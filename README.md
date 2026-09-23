@@ -97,8 +97,8 @@ vielerorts auch nicht legal.
 Gebraucht wird Python 3.10 oder neuer und ein Mikrofon.
 
 ```bash
-git clone https://github.com/JacobMenge/tastenakustik.git
-cd tastenakustik
+git clone https://github.com/JacobMenge/ki-hoert-tastatur.git
+cd ki-hoert-tastatur
 python -m venv .venv
 ```
 
