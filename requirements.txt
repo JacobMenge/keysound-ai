@@ -1,0 +1,14 @@
+# Direkte Abhaengigkeiten. Getestet mit Python 3.12 unter Windows 11.
+# Installation:  pip install -r requirements.txt
+#
+# torch kommt hier als CPU-Version - das Netz hat rund 24 000 Parameter und
+# trainiert auf einem normalen Rechner in unter zwei Minuten. Eine GPU bringt
+# bei dieser Groesse nichts.
+
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+soundfile>=0.12
+sounddevice>=0.4.6
+torch>=2.2
+pillow>=10.0

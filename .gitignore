@@ -1,0 +1,20 @@
+# Eigene Aufnahmen und alles, was daraus entsteht. Das sind deine Daten -
+# die gehoeren nicht in ein oeffentliches Repository.
+daten/
+ausgabe/
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Editoren und Betriebssystem
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
