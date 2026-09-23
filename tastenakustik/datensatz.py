@@ -69,10 +69,28 @@ def pruefe_passend(kopf: dict) -> None:
         )
 
 
+def pruefe_labels(kopf: dict, proben: list[dict]) -> None:
+    """Stecken in der Sitzung Zeichen, die gar keine eingestellte Klasse sind?
+
+    Aeltere Sitzungen haben keine Klassenliste im Kopf - dann faellt ein
+    Wechsel der Klassen erst an den Proben selbst auf. Auch das mit einer
+    klaren Meldung statt eines Tracebacks tief im Training.
+    """
+    fremd = sorted({p["label"] for p in proben} - set(TASTEN))
+    if fremd:
+        raise ValueError(
+            f"Sitzung {kopf.get('session_id', '?')} enthaelt die Zeichen "
+            f"{''.join(fremd)}, eingestellt sind {''.join(TASTEN)}. "
+            "Entweder die Klassen in Schritt 2 passend einstellen oder die "
+            "alten Sitzungen aus daten/roh/ wegraeumen."
+        )
+
+
 def lade_sitzung(ordner, segment_ms: float, vor_ms: float
                  ) -> tuple[Config, np.ndarray, np.ndarray]:
     kopf, proben = storage.lade_sitzung(ordner)
     pruefe_passend(kopf)
+    pruefe_labels(kopf, proben)
     cfg = Config(**{k: v for k, v in kopf["aufnahmeparameter"].items()
                     if k in Config.__dataclass_fields__})
     bilder, labels = [], []

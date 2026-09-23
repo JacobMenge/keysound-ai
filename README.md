@@ -1,17 +1,40 @@
-# Tastenakustik
+# keysound-ai
 
 **Klingen einzelne Tasten unterschiedlich genug, dass ein kleines neuronales
 Netz sie am Geräusch auseinanderhalten kann?**
 
-Ein Programm, mit dem du diese Frage bei dir zu Hause selbst beantwortest: Du
-nimmst deinen eigenen Datensatz auf, trainierst ein Modell darauf, und testest
-es live gegen deine eigene Tastatur. Alles läuft lokal, nichts geht ins Netz,
-und am Ende steht eine Zahl, die du selbst gemessen hast.
+<p align="center"><img src="docs/bilder/netz_training.gif" width="560" alt="Ein kleines neuronales Netz lernt, Tastenanschläge am Klang zu unterscheiden"></p>
 
-Entstanden ist das als Experiment für ein Video auf meinem Kanal
-**jacob decoded**. Der Code hier ist genau das Werkzeug, das ich dafür benutzt
-habe – nur aufgeräumt und so umgebaut, dass du deine eigenen Zeichen wählen
-kannst statt meiner.
+Ein Labor für Tastenakustik: Du nimmst deine eigenen Tastenanschläge auf,
+wählst bis zu 40 Tasten, trainierst ein kleines neuronales Netz darauf und
+testest es live gegen deine eigene Tastatur. Alles läuft lokal, nichts geht ins
+Netz, und am Ende steht eine Zahl, die du selbst gemessen hast.
+
+> **Mit KI-Unterstützung entstanden.** Idee, Experiment, Aufnahmen und
+> Messungen sind von mir. Den Code habe ich teils selbst geschrieben, teils
+> gemeinsam mit **Claude** (Anthropic) erarbeitet – ebenso diese Doku. Die
+> Zahlen hier sind echt gemessen; der Code ist da, rechne es nach.
+
+---
+
+## Was es kann
+
+* **Beliebige Tasten:** 2 bis 40 Zeichen, frei wählbar – vier Tasten für den
+  schnellen Test, die Grundreihe, die Ziffern oder das ganze Alphabet.
+* **So viele Daten, wie du willst:** geführter Aufnahmemodus, beliebig viele
+  Sitzungen, jede mit einer Rolle (Training, Validierung, Test).
+* **Qualität vor dem Training:** Pegel, Rauschabstand, Übersteuerung – und ein
+  Trennbarkeitstest, der schon vorher zeigt, ob Struktur in den Daten steckt.
+* **Training mit Live-Kurve:** Fehler und Trefferquote wachsen mit, am Ende
+  stehen beste Validierung, schwächste Klassen und das gespeicherte Modell.
+* **Live-Demo:** findet Anschläge allein im Audiosignal und zeigt, was das
+  Modell hört.
+* **Grafiken im Hochformat:** alle Ergebnisse als 1080 × 1920 – fertig für
+  Shorts, Reels und TikTok.
+* **Ehrlich gemessen:** Training, Validierung und Test werden nach ganzen
+  Sitzungen getrennt, nie nach einzelnen Proben.
+
+<p align="center"><img src="docs/bilder/studio_0_ueberblick.png" width="820" alt="Das Studio: Überblick"></p>
 
 ---
 
@@ -20,6 +43,12 @@ kannst statt meiner.
 Meine Referenzmessung, damit du weißt, worauf du dich einlässt. Acht Klassen
 (`J A C O B D E .`), ein Kondensatormikrofon rund 30 cm neben der Tastatur,
 fünf Aufnahmesitzungen an einem Tag.
+
+<p align="center">
+  <img src="docs/bilder/acht_tasten.png" width="31%" alt="Die acht Tasten">
+  <img src="docs/bilder/spektrogramm.png" width="31%" alt="Ein Anschlag als Spektrogramm">
+  <img src="docs/bilder/klassen_spektrogramme.png" width="22%" alt="Spektrogramme aller acht Klassen">
+</p>
 
 | | |
 |---|---|
@@ -31,6 +60,12 @@ fünf Aufnahmesitzungen an einem Tag.
 | **Beste Validierung** | **99,2 %** |
 | **Test, ungesehene Sitzung** | **88,3 %** |
 | Live getippt, flüssig | nahe Zufall |
+
+<p align="center">
+  <img src="docs/bilder/trainingsverlauf.png" width="31%" alt="Trainingsverlauf">
+  <img src="docs/bilder/verwechslungen_test.png" width="31%" alt="Verwechslungsmatrix auf der Testsitzung">
+  <img src="docs/bilder/was_das_modell_kann.png" width="31%" alt="Was das Modell kann">
+</p>
 
 Die drei Zahlen zusammen sind die eigentliche Geschichte:
 
@@ -97,8 +132,8 @@ vielerorts auch nicht legal.
 Gebraucht wird Python 3.10 oder neuer und ein Mikrofon.
 
 ```bash
-git clone https://github.com/JacobMenge/ki-hoert-tastatur.git
-cd ki-hoert-tastatur
+git clone https://github.com/JacobMenge/keysound-ai.git
+cd keysound-ai
 python -m venv .venv
 ```
 
@@ -131,7 +166,7 @@ Läuft der durch, läuft auch der Rest.
 
 ---
 
-## Loslegen
+## So arbeitest du damit
 
 ```bash
 python start.py
@@ -141,49 +176,78 @@ Unter Windows tut es auch ein Doppelklick auf `start.bat` – das nimmt die
 `.venv` im Projektordner, falls es eine gibt, und lässt das Fenster bei einem
 Fehler offen stehen.
 
-Das ist das ganze Programm. Ein Fenster, sechs Schritte, jeder sagt dir, was er
-braucht und schaltet den nächsten frei.
+Ein Fenster, sechs Schritte. Jeder sagt dir, was er braucht, und schaltet den
+nächsten frei; erledigte Schritte bekommen links einen grünen Haken.
 
 > Startet gar nichts, sondern kommt eine Meldung über fehlende Pakete: Dann
 > läuft ein anderes Python als das, in dem du installiert hast. Die Meldung
 > nennt beides – den Interpreter und die vier Zeilen, mit denen du eine eigene
 > Umgebung anlegst.
 
-**1 · Mikrofon.** Wähle deinen Eingang. Der Knopf *2 Sekunden mithören* misst
-Spitzenpegel und Rauschboden, während du ein paar Mal tippst. Über 25 dB
-Abstand ist gut, unter 15 dB wird es schwierig. Näher ran hilft am meisten.
+### 1 · Mikrofon
 
-**2 · Klassen.** Welche Tasten soll das Modell unterscheiden? Zwei bis vierzig
-Zeichen, frei wählbar. Vorlagen gibt es für die Grundreihe, vier Tasten, die
-Ziffern und das ganze Alphabet – aber du kannst auch einfach `qwerz.` eintippen.
-Darunter stellst du ein, wie viele Proben du je Klasse aufnehmen willst.
+Wähle deinen Eingang. Der Knopf *2 Sekunden mithören* misst Spitzenpegel und
+Rauschboden, während du ein paar Mal tippst. Über 25 dB Abstand ist gut, unter
+15 dB wird es schwierig. Näher ran hilft am meisten. Unter Windows taucht
+dasselbe Gerät mehrfach auf (WASAPI, WDM-KS, …) – im Zweifel **WDM-KS**
+nehmen, siehe [Wenn etwas nicht klappt](#wenn-etwas-nicht-klappt).
 
-**3 · Aufnehmen.** Der Collector geht im Hochformat auf, sagt dir eine Taste an,
-du drückst sie. Das dauert. Nimm mindestens drei Sitzungen auf und gib ihnen
-danach Rollen: `train` zum Lernen, `val` zum Mitprüfen, `test` für die ehrliche
-Zahl. **Die Testsitzung nimmst du am besten an einem anderen Tag auf** – nur
-dann misst sie wirklich die Taste und nicht den Raum von heute Nachmittag.
+<p align="center"><img src="docs/bilder/studio_1_mikrofon.png" width="760" alt="Schritt 1: Mikrofon wählen"></p>
 
-**4 · Daten prüfen.** Sind die Aufnahmen brauchbar? Geprüft werden Pegel,
-Abstand zum Rauschen, Übersteuerung und ob eine Rauschunterdrückung
-dazwischengefunkt hat. *Trennbarkeit messen* verrät dir schon vor dem Training,
-ob überhaupt Struktur in den Daten steckt.
+### 2 · Klassen
 
-**5 · Training.** Epochenzahl wählen, starten, zusehen. Fehler und Trefferquote
-wachsen live mit. Am Ende steht die beste Validierung, die schwächsten Klassen
-und der Pfad zum Modell. Auf Wunsch fallen die Grafiken im Hochformat
-(1080 × 1920) heraus – für Shorts, Reels und TikTok gebaut.
+Welche Tasten soll das Modell unterscheiden? Zwei bis vierzig Zeichen, frei
+wählbar. Vorlagen gibt es für die Grundreihe, vier Tasten, die Ziffern und das
+ganze Alphabet – du kannst aber auch einfach `qwerz.` eintippen. Darunter
+stellst du ein, wie viele Proben du je Klasse aufnehmen willst.
 
-**6 · Live testen.** Die Demo geht auf und hört zu. Tippe einzeln, mit einer
-kleinen Pause, und sieh zu, wie sich die Zeichenfolge aufbaut. Optional kannst
-du einen Vergleichstext hinterlegen; der wird erst *nach* der Klassifikation
+<p align="center"><img src="docs/bilder/studio_2_klassen.png" width="760" alt="Schritt 2: Klassen festlegen"></p>
+
+### 3 · Aufnehmen
+
+Der Collector geht im Hochformat auf, sagt dir eine Taste an, du drückst sie.
+Das dauert. Nimm mindestens drei Sitzungen auf und gib ihnen danach Rollen:
+`train` zum Lernen, `val` zum Mitprüfen, `test` für die ehrliche Zahl. **Die
+Testsitzung nimmst du am besten an einem anderen Tag auf** – nur dann misst sie
+wirklich die Taste und nicht den Raum von heute Nachmittag.
+
+<p align="center"><img src="docs/bilder/studio_3_aufnehmen.png" width="760" alt="Schritt 3: Sitzungen aufnehmen und Rollen vergeben"></p>
+
+### 4 · Daten prüfen
+
+Sind die Aufnahmen brauchbar? *Prüfen* checkt Pegel, Abstand zum Rauschen,
+Übersteuerung und ob eine Rauschunterdrückung dazwischengefunkt hat.
+*Trennbarkeit messen* verrät dir schon vor dem Training, ob überhaupt Struktur
+in den Daten steckt – ganz ohne neuronales Netz, mit einem einfachen
+Nächster-Schwerpunkt-Test.
+
+<p align="center"><img src="docs/bilder/studio_4_pruefen.png" width="760" alt="Schritt 4: Trennbarkeit messen"></p>
+
+### 5 · Training
+
+Epochenzahl wählen, starten, zusehen. Fehler und Trefferquote wachsen live
+mit, die gestrichelte Linie ist das Zufallsniveau. Am Ende stehen die beste
+Validierung, die schwächsten Klassen und der Pfad zum Modell. Auf Wunsch
+fallen alle Grafiken im Hochformat (1080 × 1920) heraus.
+
+<p align="center"><img src="docs/bilder/studio_5_training_fertig.png" width="760" alt="Schritt 5: Training mit Live-Kurve"></p>
+
+### 6 · Live testen
+
+Die Demo geht auf und hört zu. Tippe einzeln, mit einer kleinen Pause, und
+sieh zu, wie sich die Zeichenfolge aufbaut. Optional kannst du einen
+Vergleichstext hinterlegen; der wird erst *nach* der Klassifikation
 herangezogen und beeinflusst die Vorhersage an keiner Stelle.
+
+<p align="center"><img src="docs/bilder/studio_6_testen.png" width="760" alt="Schritt 6: Live testen"></p>
 
 ---
 
 ## Wie es funktioniert
 
 Der Weg von einem Anschlag zu einer Wahrscheinlichkeit, in sechs Stationen.
+
+<p align="center"><img src="docs/bilder/netz.png" width="520" alt="Vom Spektrogramm über drei Faltungsblöcke zur Taste"></p>
 
 **1 · Ringpuffer.** Im Aufnahmemodus laufen die letzten sechs Sekunden
 Mikrofonsignal im Arbeitsspeicher mit. Auf die Platte kommt nichts davon – nur
@@ -312,26 +376,6 @@ Fehler, das ist das Ergebnis. Genau dieser Abstand ist die interessante Zahl.
 
 ---
 
-## Mit KI gebaut
-
-Dieses Projekt ist gemeinsam mit **Claude** (Anthropic) entstanden – kein
-Geheimnis und auch nichts, was ich verstecken will. Code, Struktur und die
-Dokumentation hier sind im Dialog erarbeitet worden: Ich habe entschieden, was
-gemessen wird, wo die Grenzen liegen und wie es aussehen soll; die KI hat
-gebaut, erklärt, Fehler gefunden und mir mehr als einmal widersprochen, wenn
-ich falsch lag.
-
-Was dabei **nicht** von der KI kommt: die Messwerte. Die Aufnahmen sind echt,
-die Zahlen oben sind gemessen, und die Stellen, an denen das Experiment an
-seine Grenzen stößt, stehen genauso drin wie die Stellen, an denen es
-funktioniert. Wenn dir etwas davon komisch vorkommt – der Code ist da, rechne
-es nach.
-
-Die Icons in den Grafiken sind selbst gezeichnet (`tastenakustik/icons.py`),
-bewusst ohne fremde Icon-Bibliothek, damit es bei der Lizenz keine Fragen gibt.
-
----
-
 ## Ordnerstruktur
 
 ```
@@ -352,6 +396,7 @@ tastenakustik/            Die Bibliothek
   animation.py            Szenen als MP4 oder Bildfolge
   beispiel.py             Künstliche Anschläge für Vorschau und Selbsttest
 werkzeuge/                Die Einzelschritte als Kommandozeilenprogramme
+docs/bilder/              Bilder für dieses README
 daten/                    Deine Aufnahmen und Modelle (nicht im Repository)
 ausgabe/                  Gerenderte Grafiken (nicht im Repository)
 ```
@@ -360,6 +405,16 @@ ausgabe/                  Gerenderte Grafiken (nicht im Repository)
 dir – auch wenn du das Repository forkst und weiterentwickelst.
 
 ---
+
+## Hintergrund
+
+Entstanden ist das Projekt als Experiment für ein Video auf meinem Kanal
+**jacob decoded** – die Frage, ob eine KI hören kann, was du tippst. Aus dem
+Werkzeug fürs Video ist inzwischen ein eigenständiges Labor geworden, mit dem
+du dieselbe Frage für deine eigenen Tasten beantwortest.
+
+Die Icons in den Grafiken sind selbst gezeichnet (`tastenakustik/icons.py`),
+bewusst ohne fremde Icon-Bibliothek, damit es bei der Lizenz keine Fragen gibt.
 
 ## Lizenz
 

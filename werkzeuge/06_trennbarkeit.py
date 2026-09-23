@@ -39,7 +39,7 @@ matplotlib.use("Agg")
 import numpy as np
 import soundfile as sf
 
-from tastenakustik import features, plots, portrait, storage
+from tastenakustik import datensatz, features, plots, portrait, storage
 from tastenakustik.config import ROH, TASTEN, Config, zufall
 
 GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
@@ -49,6 +49,11 @@ GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\
 def lade(ordner: Path) -> tuple[Config, list[str], np.ndarray, list[dict]]:
     """Alle Proben einer Sitzung als Log-Mel-Bilder laden."""
     kopf, proben = storage.lade_sitzung(ordner)
+    try:
+        datensatz.pruefe_passend(kopf)
+        datensatz.pruefe_labels(kopf, proben)
+    except ValueError as fehler:
+        raise SystemExit(f"{ROT}{fehler}{AUS}")
     cfg = Config(**{k: v for k, v in kopf["aufnahmeparameter"].items()
                     if k in Config.__dataclass_fields__})
     sr = cfg.samplerate
