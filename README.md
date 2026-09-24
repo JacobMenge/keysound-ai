@@ -230,6 +230,11 @@ mit, die gestrichelte Linie ist das Zufallsniveau. Am Ende stehen die beste
 Validierung, die schwächsten Klassen und der Pfad zum Modell. Auf Wunsch
 fallen alle Grafiken im Hochformat (1080 × 1920) heraus.
 
+*Auf Testsitzung prüfen* holt dann die ehrliche Zahl: Das fertige Modell wird
+gegen deine `test`-Sitzung gerechnet, die weder beim Lernen noch bei der Wahl
+des besten Stands mitgespielt hat. Das Ergebnis landet zusätzlich in
+`daten/modelle/test_ergebnis.json`.
+
 <p align="center"><img src="docs/bilder/studio_5_training_fertig.png" width="760" alt="Schritt 5: Training mit Live-Kurve"></p>
 
 ### 6 · Live testen
@@ -238,6 +243,12 @@ Die Demo geht auf und hört zu. Tippe einzeln, mit einer kleinen Pause, und
 sieh zu, wie sich die Zeichenfolge aufbaut. Optional kannst du einen
 Vergleichstext hinterlegen; der wird erst *nach* der Klassifikation
 herangezogen und beeinflusst die Vorhersage an keiner Stelle.
+
+Bedient wird die Demo nur mit der Maus – über die Knöpfe unter dem Bild oder
+mit einem Rechtsklick ins Bild, der auch im Bühnenmodus ohne Knopfleiste
+funktioniert. Die Tastatur bleibt damit komplett frei: Jede Taste, die du
+drückst, ist ein Testanschlag und löst sonst nichts aus. Dasselbe gilt für die
+Pegelanzeige aus Schritt 1.
 
 <p align="center"><img src="docs/bilder/studio_6_testen.png" width="760" alt="Schritt 6: Live testen"></p>
 
@@ -302,7 +313,7 @@ genauer steuern will, findet dieselben Schritte als einzelne Programme:
 | `werkzeuge/04_sitzungen.py` | Sitzungen auflisten, Rollen vergeben |
 | `werkzeuge/05_daten_pruefen.py` | Qualitätsprüfung einer Sitzung |
 | `werkzeuge/06_trennbarkeit.py` | Nächster-Schwerpunkt-Test – Struktur in den Daten, ganz ohne Lernen |
-| `werkzeuge/07_training.py` | Training auf der Kommandozeile |
+| `werkzeuge/07_training.py` | Training auf der Kommandozeile, mit `--test` die Auswertung auf der Testsitzung |
 | `werkzeuge/08_demo.py` | Live-Demo, rein aus dem Audiosignal |
 | `werkzeuge/09_selbsttest.py` | Installation und Pipeline prüfen, ohne Mikrofon |
 | `werkzeuge/90_layoutvorschau.py` | Alle Grafiken mit Beispieldaten rendern |
@@ -335,7 +346,9 @@ Die **Sperrfolge** ist ein optionales Extra: Trägst du dort ein Wort ein, sorgt
 der Collector dafür, dass genau diese Zeichenfolge in keiner Aufnahmefolge
 zusammenhängend vorkommt. Trainiert werden ohnehin einzelne, zufällig
 angeordnete Anschläge – so bleibt das Wort aber sauber für einen späteren
-Blindtest reserviert.
+Blindtest reserviert. Das Wort braucht mindestens zwei Zeichen, und alle
+müssen zu deinen Klassen gehören – sonst ließe es sich später gar nicht
+blind testen.
 
 Wechselst du die Klassen, während schon Aufnahmen herumliegen, bricht das
 Training mit einer klaren Meldung ab, statt stillschweigend zwei Datensätze zu
@@ -391,6 +404,7 @@ tastenakustik/            Die Bibliothek
   training.py             Der Trainingslauf
   plots.py                Alle Grafiken im Hochformat
   portrait.py             Die 1080-x-1920-Leinwand
+  bedienung.py            Knopfleiste und Rechtsklick-Menü der Live-Fenster
   theme.py                Farben und Schrift
   icons.py                Selbst gezeichnete Icons
   animation.py            Szenen als MP4 oder Bildfolge
