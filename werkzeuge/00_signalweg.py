@@ -49,6 +49,11 @@ def main() -> int:
     p.add_argument("--geraet", default=None, help="Index oder Namensfragment")
     p.add_argument("--sekunden", type=float, default=1.0, help="Takt der Anzeige")
     args = p.parse_args()
+    if args.sekunden < 0.2:
+        # Darunter passen keine zwei Messbloecke in einen Takt - die Anzeige
+        # bliebe stumm und die Schleife liefe leer.
+        print("--sekunden muss mindestens 0.2 sein.")
+        return 1
 
     cfg = Config.laden()
     if args.geraet is not None:
@@ -88,17 +93,19 @@ def main() -> int:
             ruhe = float(np.percentile(pegel, 20))     # was zwischen den Geraeuschen ist
             laut = float(pegel.max())
 
+            # "so kann aufgenommen werden" erst nach drei sauberen Messungen
+            # in Folge - jede andere Messung faengt die Zaehlung neu an.
             if ruhe < GATE_GRENZE:
                 farbe, urteil = ROT, "Gate oder Mute aktiv"
+                ruhig_seit = 0
             elif ruhe > -45:
                 farbe, urteil = GELB, "sehr lauter Raum"
+                ruhig_seit = 0
             else:
                 farbe, urteil = GRUEN, "sauber"
                 ruhig_seit += 1
-            if ruhe >= GATE_GRENZE and ruhig_seit >= 3:
-                urteil = "sauber - so kann aufgenommen werden"
-            if ruhe < GATE_GRENZE:
-                ruhig_seit = 0
+                if ruhig_seit >= 3:
+                    urteil = "sauber - so kann aufgenommen werden"
 
             print(f"{ruhe:9.1f}  {laut:8.1f}   {farbe}{balken(ruhe)}  {urteil}{AUS}")
     except KeyboardInterrupt:

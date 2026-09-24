@@ -437,7 +437,8 @@ def trainingsverlauf(epochen, train_loss, val_loss, train_acc, val_acc,
     ax2.axhline(zufall() * 100, color=theme.TEXT_SCHWACH, ls="--", lw=2.4)
     ax2.set_ylim(0, 100)
     P.achse_aufraeumen(ax2, y_ticks=[0, 50, 100])
-    ax2.text(0.985, zufall() + 0.04, "Zufall", color=theme.TEXT_SCHWACH,
+    # y in Datenkoordinaten - die Achse laeuft in Prozent.
+    ax2.text(0.985, zufall() * 100 + 2, "Zufall", color=theme.TEXT_SCHWACH,
              fontsize=P.S_TICK, ha="right", va="bottom",
              transform=ax2.get_yaxis_transform(which="grid"))
     return fig

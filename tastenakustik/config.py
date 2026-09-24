@@ -93,8 +93,12 @@ def ist_demo_taste(zeichen: str) -> bool:
 
 
 def anzeige(taste: str) -> str:
-    """Grosses Zeichen fuer die Anzeige."""
-    return taste.upper()
+    """Grosses Zeichen fuer die Anzeige.
+
+    Die Leertaste bekommt ein sichtbares Zeichen - als Leerzeichen stuende
+    sie in jeder Tabelle, Kachel und Matrix als Luecke da.
+    """
+    return "␣" if taste == " " else taste.upper()
 
 
 def beiname(taste: str) -> str:

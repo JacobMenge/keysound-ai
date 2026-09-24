@@ -33,12 +33,17 @@ def systeminfo() -> None:
     titel("System")
     print(f"  OS          {platform.system()} {platform.release()} ({platform.machine()})")
     print(f"  Python      {platform.python_version()}  -  {sys.executable}")
+    # Nicht nur ImportError: Eine kaputte Installation unter Windows meldet
+    # sich oft mit OSError (DLL laesst sich nicht laden) - das darf den
+    # Systemcheck nicht abbrechen, er soll es ja gerade anzeigen.
     for name in ("numpy", "scipy", "sounddevice", "soundfile", "matplotlib"):
         try:
             mod = __import__(name)
             print(f"  {name:<12}{getattr(mod, '__version__', '?')}")
         except ImportError:
             print(f"  {name:<12}{ROT}fehlt{AUS}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {name:<12}{ROT}laesst sich nicht laden: {exc}{AUS}")
     try:
         import torch  # noqa: PLC0415
 
@@ -46,6 +51,9 @@ def systeminfo() -> None:
         print(f"  torch       {torch.__version__} ({cuda})  {GRAU}- erst fuers Training noetig{AUS}")
     except ImportError:
         print(f"  torch       {GRAU}nicht installiert - erst fuers Training noetig{AUS}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  torch       {GELB}laesst sich nicht laden ({exc}) - erst fuers "
+              f"Training noetig{AUS}")
 
 
 def geraete_zeigen(alle: list[audio.Geraet]) -> None:
@@ -75,7 +83,9 @@ def messen(g: audio.Geraet, sekunden: float, samplerate: int, kanaele: int) -> b
     rms = audio.rms_dbfs(x)
     peak = audio.peak_dbfs(x)
     dc = float(np.mean(x))
-    stumm = peak < -70
+    # Ein sehr sauberes Interface rauscht bei -80 bis -85 dBFS, die Spitze
+    # liegt dann um -72. Wirklich stumm ist erst, was darunter bleibt.
+    stumm = peak < -90
 
     print(f"  Rauschboden (RMS)   {rms:7.1f} dBFS")
     print(f"  Spitze              {peak:7.1f} dBFS")
@@ -128,6 +138,11 @@ def main() -> int:
         print(f"  {GRAU}Geraet liefert {kanaele} Kanaele; ausgewertet wird Kanal 1.{AUS}")
 
     ok = messen(g, args.sekunden, sr, kanaele)
+    if not ok:
+        # Ein Eingang, der nichts liefert, soll nicht als neues Mikrofon
+        # in der Konfiguration landen.
+        print(f"\n  {GELB}Konfiguration nicht geaendert.{AUS}")
+        return 1
 
     cfg = Config.laden()
     cfg.device = g.index
@@ -147,7 +162,7 @@ def main() -> int:
     print(f"  Klassen           {' '.join(t.upper() for t in TASTEN)}")
 
     print(f"\n  Naechster Schritt: {GRUEN}python werkzeuge/02_kalibrierung.py{AUS}")
-    return 0 if ok else 1
+    return 0
 
 
 if __name__ == "__main__":

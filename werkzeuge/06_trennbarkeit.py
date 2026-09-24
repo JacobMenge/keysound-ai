@@ -40,10 +40,18 @@ import numpy as np
 import soundfile as sf
 
 from tastenakustik import datensatz, features, plots, portrait, storage
-from tastenakustik.config import ROH, TASTEN, Config, zufall
+from tastenakustik.config import ROH, TASTEN, Config, anzeige, zufall
 
 GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
 
+
+def ueber_zufall(quote: float) -> float:
+    """Wie weit die Quote vom Zufall zur Perfektion gekommen ist (0 bis 1).
+
+    Feste Schwellen wie "ueber 50 %" taugen nicht, wenn die Klassenzahl frei
+    ist: Bei zwei Klassen ist das Raten, bei vierzig ein starkes Signal.
+    """
+    return (quote - zufall()) / max(1.0 - zufall(), 1e-9)
 
 
 def lade(ordner: Path) -> tuple[Config, list[str], np.ndarray, list[dict]]:
@@ -71,6 +79,9 @@ def lade(ordner: Path) -> tuple[Config, list[str], np.ndarray, list[dict]]:
                                        cfg.mel_baender, cfg.mel_fmin, cfg.mel_fmax))
         labels.append(p["label"])
         behalten.append(p)
+    if not bilder:
+        raise SystemExit(f"{ROT}Sitzung {ordner.name} enthaelt keine verwertbaren "
+                         f"Proben.{AUS}")
     return cfg, labels, np.stack(bilder), behalten
 
 
@@ -85,10 +96,13 @@ def merkmale(bilder: np.ndarray, ohne_lautstaerke: bool) -> np.ndarray:
 
 
 def naechster_mittelwert(x_train, y_train, x_test) -> np.ndarray:
+    # Nur Klassen, die beim Anlernen vorkommen: Der Mittelwert einer leeren
+    # Klasse waere NaN - und argmin wuerde dann jede Probe ihr zuschlagen.
+    vorhanden = [t for t in TASTEN if t in set(y_train)]
     mitten = np.stack([x_train[[i for i, y in enumerate(y_train) if y == t]].mean(axis=0)
-                       for t in TASTEN])
+                       for t in vorhanden])
     abstand = ((x_test[:, None, :] - mitten[None, :, :]) ** 2).sum(axis=2)
-    return np.array([TASTEN[i] for i in abstand.argmin(axis=1)])
+    return np.array([vorhanden[i] for i in abstand.argmin(axis=1)])
 
 
 def bewerte(y_wahr, y_vorher) -> tuple[float, np.ndarray]:
@@ -112,10 +126,29 @@ def main() -> int:
         print("Keine Sitzungen gefunden.")
         return 1
 
+    for name in (args.train, args.test):
+        if name and not (ROH / name / "session.json").exists():
+            print(f"{ROT}Sitzung {name} nicht gefunden.{AUS}")
+            return 1
+    # Abgebrochene, leere Sitzungen kommen fuer die Auswahl nicht in Frage.
     groessen = {o.name: len(storage.lade_sitzung(o)[1]) for o in alle}
-    train_name = args.train or max(groessen, key=groessen.get)
+    groessen = {n: g for n, g in groessen.items() if g > 0}
+    if not groessen and not args.train:
+        print("Es gibt noch keine Sitzung mit Proben.")
+        return 1
+    kandidaten = {n: g for n, g in groessen.items() if n != args.test}
+    train_name = args.train or (max(kandidaten, key=kandidaten.get)
+                                if kandidaten else None)
+    if train_name is None:
+        print(f"{ROT}Zum Anlernen braucht es eine andere Sitzung als "
+              f"{args.test}.{AUS}")
+        return 1
     rest = [n for n in groessen if n != train_name and groessen[n] >= len(TASTEN)]
     test_name = args.test or (rest[-1] if rest else None)
+    if test_name == train_name:
+        print(f"{ROT}Anlernen und Pruefen an derselben Sitzung ergibt keine "
+              f"Aussage.{AUS}")
+        return 1
 
     cfg, y_train, b_train, _ = lade(ROH / train_name)
     print(f"Anlernen an {train_name}  ({len(y_train)} Proben)")
@@ -147,23 +180,32 @@ def main() -> int:
         y_vor = naechster_mittelwert(x_tr, y_train, x_te)
         quote, matrix = bewerte(y_test, y_vor)
         ergebnisse[name] = (quote, matrix)
-        farbe = GRUEN if quote > 0.4 else (GELB if quote > 0.2 else ROT)
+        anteil = ueber_zufall(quote)
+        farbe = GRUEN if anteil >= 0.5 else (GELB if anteil >= 0.15 else ROT)
         print(f"\n{name}")
         print(f"  Trefferquote  {farbe}{quote * 100:5.1f} %{AUS}   "
               f"({quote / zufall():.1f}-fach ueber Zufall)")
-        je_klasse = matrix.diagonal() / np.maximum(matrix.sum(axis=1), 1)
-        beste = int(np.argmax(je_klasse))
-        schlechteste = int(np.argmin(je_klasse))
-        print(f"  am besten     {TASTEN[beste].upper()}  {je_klasse[beste] * 100:.0f} %")
-        print(f"  am schwersten {TASTEN[schlechteste].upper()}  "
+        # Nur Klassen, die in der Pruefung ueberhaupt vorkamen - eine Klasse
+        # ohne Probe ist nicht "am schwersten", sie ist gar nicht gemessen.
+        zeilen = matrix.sum(axis=1)
+        gemessen = [i for i in range(len(TASTEN)) if zeilen[i] > 0]
+        je_klasse = {i: matrix[i, i] / zeilen[i] for i in gemessen}
+        beste = max(je_klasse, key=je_klasse.get)
+        schlechteste = min(je_klasse, key=je_klasse.get)
+        print(f"  am besten     {anzeige(TASTEN[beste])}  {je_klasse[beste] * 100:.0f} %")
+        print(f"  am schwersten {anzeige(TASTEN[schlechteste])}  "
               f"{je_klasse[schlechteste] * 100:.0f} %")
+        if len(gemessen) < len(TASTEN):
+            print(f"  {GRAU}ohne Pruefprobe: "
+                  f"{' '.join(anzeige(TASTEN[i]) for i in range(len(TASTEN)) if i not in je_klasse)}"
+                  f"{AUS}")
 
-    beste_quote = max(q for q, _ in ergebnisse.values())
+    beste_anteil = max(ueber_zufall(q) for q, _ in ergebnisse.values())
     print("\n" + "-" * 60)
-    if beste_quote > 0.5:
+    if beste_anteil >= 0.5:
         print(f"{GRUEN}Die Klassen sind deutlich unterscheidbar. Ein kleines CNN")
         print(f"sollte hier klar besser werden als dieser einfache Ansatz.{AUS}")
-    elif beste_quote > 0.25:
+    elif beste_anteil >= 0.15:
         print(f"{GELB}Es steckt Struktur in den Daten, aber sie ist nicht eindeutig.")
         print(f"Ein CNN ist einen Versuch wert - mit ehrlicher Erwartung.{AUS}")
     else:
@@ -172,7 +214,7 @@ def main() -> int:
 
     if args.bild:
         mittel = {t: b_train[[i for i, y in enumerate(y_train) if y == t]].mean(axis=0)
-                  for t in TASTEN}
+                  for t in TASTEN if t in set(y_train)}
         fig = plots.klassen_vergleich(mittel, cfg)
         print(f"\n  {portrait.exportiere(fig, '04_klassenvergleich', '03_daten')}")
         quote, matrix = ergebnisse["ohne Lautstaerke"]

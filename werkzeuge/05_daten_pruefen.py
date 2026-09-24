@@ -32,8 +32,8 @@ matplotlib.use("Agg")
 import numpy as np
 import soundfile as sf
 
-from tastenakustik import plots, portrait, storage, theme
-from tastenakustik.config import ROH, TASTEN, Config
+from tastenakustik import datensatz, features, plots, portrait, storage
+from tastenakustik.config import ROH, TASTEN, Config, anzeige
 
 GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
 
@@ -43,6 +43,12 @@ GATE_VERDACHT_DBFS = -95.0
 # Nachhall: aus der Zeit bis -40 dB laesst sich die Nachhallzeit abschaetzen.
 # Ein Arbeitsraum liegt bei 0,2 bis 0,5 s. Erst deutlich darueber verschmiert
 # der Anschlag so stark, dass die Klassen ineinanderlaufen.
+#
+# Das Fenster nach dem Anschlag ist nur rund 400 ms lang - mehr als etwa 0,6 s
+# laesst sich darin gar nicht messen. Klingt die Mehrheit der Anschlaege im
+# Fenster nicht auf -40 dB ab, wird das deshalb ausdruecklich gemeldet statt
+# als scheinbar harmloser Wert knapp unter der Warnschwelle.
+ABFALL_DB = 40.0
 NACHHALL_WARNUNG_S = 0.60
 
 
@@ -50,22 +56,29 @@ def titel(text: str) -> None:
     print(f"\n{text}\n" + "-" * len(text))
 
 
-def abklingzeit_ms(x: np.ndarray, sr: int, ab_db: float = 40.0) -> float:
-    """Zeit von der Spitze bis der Pegel um ab_db gefallen ist."""
+def abklingzeit_ms(x: np.ndarray, sr: int, ab_db: float = ABFALL_DB
+                   ) -> tuple[float, bool]:
+    """Zeit von der Spitze, bis der Pegel um ab_db gefallen ist.
+
+    Gibt (ms, erreicht) zurueck. erreicht ist False, wenn das Fenster endet,
+    bevor der Pegel so weit gefallen ist - dann ist die Zeit eine Untergrenze.
+    """
     hoch = np.abs(x)
     i = int(np.argmax(hoch))
     spitze = hoch[i]
     if spitze <= 0:
-        return 0.0
+        return 0.0, True
     schwelle = spitze * (10 ** (-ab_db / 20))
     # gleitendes Maximum ueber 5 ms, damit einzelne Nulldurchgaenge nicht zaehlen
     w = max(int(0.005 * sr), 1)
     rest = hoch[i:]
     if rest.size < w * 2:
-        return 0.0
+        return 0.0, False
     block = rest[: rest.size // w * w].reshape(-1, w).max(axis=1)
     unter = np.flatnonzero(block < schwelle)
-    return float(unter[0] * w / sr * 1000) if unter.size else float(rest.size / sr * 1000)
+    if unter.size:
+        return float(unter[0] * w / sr * 1000), True
+    return float(rest.size / sr * 1000), False
 
 
 def main() -> int:
@@ -79,10 +92,16 @@ def main() -> int:
     if not alle:
         print(f"Keine Sitzungen unter {ROH}")
         return 1
-    ordner = (ROH / args.sitzung) if args.sitzung else alle[-1]
-    if not ordner.exists():
-        print(f"Sitzung {args.sitzung} nicht gefunden.")
-        return 1
+    if args.sitzung:
+        ordner = ROH / args.sitzung
+        if not (ordner / "session.json").exists():
+            print(f"Sitzung {args.sitzung} nicht gefunden.")
+            return 1
+    else:
+        # Die neueste Sitzung mit Proben - eine gerade abgebrochene, leere
+        # Sitzung sagt nichts ueber die Aufnahmen.
+        mit_proben = [o for o in alle if storage.lade_sitzung(o)[1]]
+        ordner = mit_proben[-1] if mit_proben else alle[-1]
 
     kopf, proben = storage.lade_sitzung(ordner)
     cfg = Config(**{k: v for k, v in kopf["aufnahmeparameter"].items()
@@ -95,12 +114,20 @@ def main() -> int:
         wert = kopf.get(feld) or f"{GRAU}(leer){AUS}"
         print(f"  {name:<10} {wert}")
     print(f"  {'Geraet':<10} {cfg.device_name}  ({cfg.samplerate} Hz)")
+    try:
+        datensatz.pruefe_passend(kopf)
+        datensatz.pruefe_labels(kopf, proben)
+    except ValueError as fehler:
+        # Trotzdem pruefen - Pegel und Signalweg sagen auch dann etwas. Nur
+        # die Zaehlung je Klasse laeuft ueber die Klassen dieser Sitzung.
+        print(f"\n  {GELB}{fehler}{AUS}")
+    klassen = list(kopf.get("tasten") or TASTEN)
 
     # --- 1. Vollstaendigkeit -------------------------------------------
     titel("Proben")
-    je_klasse = {t: sum(1 for x in proben if x["label"] == t) for t in TASTEN}
-    for t in TASTEN:
-        print(f"  {t.upper():<3} {je_klasse[t]:>4}")
+    je_klasse = {t: sum(1 for x in proben if x["label"] == t) for t in klassen}
+    for t in klassen:
+        print(f"  {anzeige(t):<3} {je_klasse[t]:>4}")
     print(f"  {'gesamt':<3} {len(proben):>4}")
     verworfen = kopf.get("verworfen", {})
     if verworfen:
@@ -112,6 +139,8 @@ def main() -> int:
             print(f"    {grund:<14} {n}")
 
     if not proben:
+        print(f"\n  {GELB}Diese Sitzung enthaelt keine Proben - vermutlich direkt "
+              f"abgebrochen.{AUS}")
         return 1
 
     # --- 2. Pegel und Lage ---------------------------------------------
@@ -134,18 +163,23 @@ def main() -> int:
 
     # --- 3. Dynamikbearbeitung -----------------------------------------
     titel("Signalweg")
-    vorlauf, abkling = [], []
+    vorlauf, abkling, erreicht = [], [], []
     for x in proben:
         welle, _ = sf.read(ordner / x["datei"], dtype="float32")
         vor = welle[: int(0.10 * sr)].astype(np.float64)
         vorlauf.append(20 * np.log10(max(float(np.sqrt((vor ** 2).mean())), 1e-12)))
-        abkling.append(abklingzeit_ms(welle, sr))
+        ms, ok = abklingzeit_ms(welle, sr)
+        abkling.append(ms)
+        erreicht.append(ok)
     vorlauf, abkling = np.array(vorlauf), np.array(abkling)
 
-    nachhall = float(np.median(abkling)) * 60.0 / 40.0 / 1000.0
+    nachhall = float(np.median(abkling)) * 60.0 / ABFALL_DB / 1000.0
+    # Klingt die Mehrheit im Fenster nicht weit genug ab, ist die Zahl nur
+    # eine Untergrenze.
+    untergrenze = bool(np.mean(erreicht) < 0.5)
     print(f"  Pegel vor dem Anschlag   median {np.median(vorlauf):7.1f} dBFS")
-    print(f"  Abklingen auf -40 dB     median {np.median(abkling):7.0f} ms"
-          f"   (Nachhall rund {nachhall:.2f} s)")
+    print(f"  Abklingen auf -{ABFALL_DB:.0f} dB     median {np.median(abkling):7.0f} ms"
+          f"   (Nachhall {'mindestens' if untergrenze else 'rund'} {nachhall:.2f} s)")
 
     # Entscheidend ist allein die Stille zwischen den Anschlaegen. Die
     # Abklingzeit haengt am Raum und schwankt auch bei identischem Aufbau -
@@ -167,7 +201,14 @@ def main() -> int:
         print("    - jeder Anschlag bekommt dieselbe kuenstliche Ausklingkurve")
     else:
         print(f"  {GRUEN}BEFUND: Signalweg ist sauber - kein Gate, kein Kompressor.{AUS}")
-        if nachhall > NACHHALL_WARNUNG_S:
+        if untergrenze:
+            print(f"  {GELB}Die meisten Anschlaege klingen im Aufnahmefenster nicht auf "
+                  f"-{ABFALL_DB:.0f} dB ab.{AUS}")
+            print(f"  {GELB}Entweder hallt der Raum kraeftig, oder der Rauschboden liegt "
+                  f"zu nah an den Anschlaegen.{AUS}")
+            print(f"  {GELB}Beides macht die Klassen aehnlicher - naeher ran ans Mikrofon, "
+                  f"weiche Oberflaechen helfen.{AUS}")
+        elif nachhall > NACHHALL_WARNUNG_S:
             print(f"  {GELB}Der Raum hallt mit rund {nachhall:.2f} s allerdings kraeftig."
                   f" Das verschmiert{AUS}")
             print(f"  {GELB}den Anschlag und macht die Klassen aehnlicher. "
@@ -175,17 +216,18 @@ def main() -> int:
 
     # --- 4. Bild -------------------------------------------------------
     if args.bild:
+        # Derselbe Schnitt wie in 06_trennbarkeit - sonst entstehen unter
+        # demselben Dateinamen zwei verschieden geschnittene Bilder.
+        n_seg = int(cfg.segment_ms / 1000 * sr)
+        vor_n = int(cfg.segment_vor_onset_ms / 1000 * sr)
         mittel = {}
         for t in TASTEN:
             stapel = []
             for x in [q for q in proben if q["label"] == t]:
                 welle, _ = sf.read(ordner / x["datei"], dtype="float32")
-                s0, s1 = (x["onset_sample"] - int(0.03 * sr),
-                          x["onset_sample"] - int(0.03 * sr) + int(cfg.segment_ms / 1000 * sr))
-                s0 = max(0, min(s0, welle.size - (s1 - s0)))
-                from tastenakustik import features
+                s0 = max(0, min(x["onset_sample"] - vor_n, welle.size - n_seg))
                 stapel.append(features.log_mel(
-                    welle[s0:s0 + int(cfg.segment_ms / 1000 * sr)], sr, cfg.mel_nfft,
+                    welle[s0:s0 + n_seg], sr, cfg.mel_nfft,
                     cfg.mel_hop, cfg.mel_baender, cfg.mel_fmin, cfg.mel_fmax))
             if stapel:
                 mittel[t] = np.mean(stapel, axis=0)

@@ -143,9 +143,11 @@ def main() -> int:
        not (set(d_train.sitzungen) & set(d_test.sitzungen)))
 
     # Eine garantiert andere Liste - auch wenn nur zwei Klassen im Spiel sind.
+    # Bei vierzig Klassen wird ersetzt statt angehaengt, mehr sind nicht erlaubt.
     merker = list(config.TASTEN)
-    fremd = next(c for c in "xyzq0189&%" if c not in merker)
-    config.setze_klassen(merker + [fremd])
+    fremd = next(c for c in map(chr, range(0x21, 0x250))
+                 if c.lower() == c and len(c) == 1 and c not in merker)
+    config.setze_klassen((merker if len(merker) < 40 else merker[:-1]) + [fremd])
     try:
         datensatz.lade("train")
         ok("Klassenwechsel faellt auf", False)

@@ -95,20 +95,27 @@ SEQUENZ = (CFG.sperrfolge if CFG.sperrfolge and
            else beispiel.beispiel_sequenz(8))
 
 
-def _echte_wahrscheinlichkeiten(taste: str, nummer: int | None = None):
+def _echte_wahrscheinlichkeiten(taste: str, nummer: int | None = None,
+                                ersatz: bool = False):
     """Eine echte Vorhersage des trainierten Netzes holen.
 
     Mit `nummer` wird deterministisch ausgewaehlt statt gewuerfelt. Fuer die
     Sequenz ist das wichtig: Bei 88 % je Zeichen ist ein fehlerfreier
     Dreizehnerlauf zu rund 19 % zu erwarten - wer so lange wuerfelt, bis er
     einen erwischt, zeigt nicht das Modell, sondern seine Geduld.
+
+    Gibt es keine Aufnahme dieser Taste, kommt (None, None, None) zurueck -
+    ausser mit `ersatz`, dann darf es eine beliebige Taste sein. Das zurueck-
+    gegebene Label ist immer das der tatsaechlich verwendeten Aufnahme.
     """
     netz, stand = lade_modell()
     if netz is None or not PROBEN:
         return None, None, None
     import torch
     from tastenakustik import datensatz as ds
-    passende = [p for p in PROBEN if p[0] == taste] or PROBEN
+    passende = [p for p in PROBEN if p[0] == taste] or (PROBEN if ersatz else [])
+    if not passende:
+        return None, None, None
     i = (nummer % len(passende)) if nummer is not None else int(rng.integers(len(passende)))
     label, welle, onset, cfg = passende[i]
     n = int(stand["segment_ms"] / 1000 * cfg.samplerate)
@@ -120,7 +127,8 @@ def _echte_wahrscheinlichkeiten(taste: str, nummer: int | None = None):
     x = ds.normiere(mel[None].astype(np.float32))
     with torch.no_grad():
         p = torch.softmax(netz(torch.from_numpy(x).unsqueeze(1))[0], 0).numpy()
-    return label, {t: float(v) for t, v in zip(TASTEN, p)}, mel
+    # Das Netz bekommt (Baender, Zeit), die Grafik erwartet (Zeit, Baender).
+    return label, {t: float(v) for t, v in zip(TASTEN, p)}, mel.T
 
 
 def _fenster(taste: str) -> tuple[np.ndarray, int, bool]:
@@ -160,7 +168,7 @@ def szene_pipeline(stempel: bool) -> Szene:
 
 def szene_modell(stempel: bool) -> Szene:
     """Bild rein, Netz rechnet, eine Zahl je Klasse raus."""
-    label, p, mel = _echte_wahrscheinlichkeiten(TASTEN[0])
+    label, p, mel = _echte_wahrscheinlichkeiten(TASTEN[0], ersatz=True)
     echt = p is not None
     if not echt:
         p, mel = _wahrscheinlichkeiten(TASTEN[0], 0.90), None
@@ -227,7 +235,7 @@ def szene_confusion(stempel: bool) -> Szene:
 
 def szene_vorhersage(stempel: bool) -> Szene:
     """Balken laufen hoch, dann kommt das Ergebnis."""
-    label, p, _mel = _echte_wahrscheinlichkeiten(TASTEN[0])
+    label, p, _mel = _echte_wahrscheinlichkeiten(TASTEN[0], ersatz=True)
     echt = p is not None
     if not echt:
         label, p = TASTEN[0], _wahrscheinlichkeiten(TASTEN[0], 0.91)
@@ -249,7 +257,7 @@ def szene_vergleich(stempel: bool) -> Szene:
     davon wird geraten.
     """
     echt = TEST is not None
-    val = TEST["val_quote"] if echt else (
+    val = (TEST.get("val_quote") if echt else None) or (
         ERGEBNIS["beste_val"] if ERGEBNIS else 0.99)
     test = TEST["test_quote"] if echt else 0.88
     stufen = [

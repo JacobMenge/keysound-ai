@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tastenakustik import storage
-from tastenakustik.config import ROH, TASTEN, Config
+from tastenakustik.config import ROH, TASTEN, Config, anzeige
 
 GRUEN, GELB, GRAU, AUS = "\033[92m", "\033[93m", "\033[90m", "\033[0m"
 ROLLEN_FARBE = {"train": GRUEN, "val": GELB, "test": "\033[96m", "offen": GRAU}
@@ -33,19 +33,24 @@ def tabelle() -> None:
         print(f"Noch keine Sitzungen unter {ROH}")
         return
 
-    kopf = "  ".join(f"{t.upper():>3}" for t in TASTEN)
+    kopf = "  ".join(f"{anzeige(t):>3}" for t in TASTEN)
     print(f"\n{'Sitzung':<22} {'Rolle':<7} {'ges':>4}   {kopf}   Notiz")
     print("-" * (22 + 8 + 6 + len(kopf) + 12))
     summe = {t: 0 for t in TASTEN}
+    fremde = []
     for z in zeilen:
         farbe = ROLLEN_FARBE.get(z["rolle"], GRAU)
         zahlen = "  ".join(f"{z['je_taste'].get(t, 0):>3}" for t in TASTEN)
         for t in TASTEN:
             summe[t] += z["je_taste"].get(t, 0)
+        # Sitzungen mit anderen Klassen fallen sonst nur als Luecke auf.
+        andere = any(n and t not in TASTEN for t, n in z["je_taste"].items())
+        if andere:
+            fremde.append(z["session_id"])
         print(f"{z['session_id']:<22} {farbe}{z['rolle']:<7}{AUS} {z['gesamt']:>4}   "
-              f"{zahlen}   {z['notiz'][:28]}")
+              f"{zahlen}   {'* ' if andere else ''}{z['notiz'][:28]}")
     print("-" * (22 + 8 + 6 + len(kopf) + 12))
-    gesamt = sum(summe.values())
+    gesamt = sum(z["gesamt"] for z in zeilen)
     print(f"{'Summe':<22} {'':<7} {gesamt:>4}   "
           + "  ".join(f"{summe[t]:>3}" for t in TASTEN))
 
@@ -53,6 +58,11 @@ def tabelle() -> None:
     for z in zeilen:
         nach_rolle[z["rolle"]] = nach_rolle.get(z["rolle"], 0) + z["gesamt"]
     print("\nProben je Rolle:  " + "   ".join(f"{k}: {v}" for k, v in sorted(nach_rolle.items())))
+
+    if fremde:
+        print(f"\n{GELB}* mit anderen Klassen aufgenommen: {', '.join(fremde)}.{AUS}")
+        print(f"{GRAU}  Diese Sitzungen passen nicht zu {''.join(TASTEN)} - fuer das "
+              f"Training aus daten/roh/ wegraeumen oder die Klassen zurueckstellen.{AUS}")
 
     if nach_rolle.get("offen"):
         print(f"\n{GELB}Noch nicht zugeordnete Sitzungen. Empfehlung: die zuletzt "
