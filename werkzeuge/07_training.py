@@ -16,6 +16,9 @@ Aufruf:
     python werkzeuge/07_training.py
     python werkzeuge/07_training.py --epochen 80 --segment 250
     python werkzeuge/07_training.py --test             # neuestes Modell gegen "test"
+
+Ohne --segment/--vor gelten segment_ms und segment_vor_onset_ms aus der
+config.json. --test nimmt dagegen immer die Werte aus der Modelldatei.
 """
 
 from __future__ import annotations
@@ -31,10 +34,20 @@ matplotlib.use("Agg")
 
 import numpy as np
 
-from tastenakustik import datensatz, plots, portrait, training
-from tastenakustik.config import TASTEN, Config, anzeige, zufall
+from tastenakustik import datensatz, plots, portrait, storage, training
+from tastenakustik.config import TASTEN, anzeige, laden_oder_beenden, zufall
 
 GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
+
+
+def naechster_schritt() -> None:
+    """Hinweis, wie es weitergeht - ohne Sitzungen ist Zuordnen sinnlos."""
+    if not storage.sitzungen():
+        print(f"{GRAU}Erst aufnehmen: python werkzeuge/03_collector.py "
+              f"(oder python start.py, Schritt 3){AUS}")
+    else:
+        print(f"{GRAU}Zuordnen mit: python werkzeuge/04_sitzungen.py "
+              f"--rolle <ID>=train{AUS}")
 
 
 def farbe_fuer(quote: float) -> str:
@@ -54,19 +67,28 @@ def je_klasse_zeilen(quoten: dict[str, float]) -> None:
 def main() -> int:
     p = argparse.ArgumentParser(description="Kleines CNN trainieren")
     p.add_argument("--rollen", action="store_true", help="Rollenzuordnung zeigen")
-    p.add_argument("--epochen", type=int, default=80)
-    p.add_argument("--segment", type=float, default=250.0, help="Segmentlaenge in ms")
-    p.add_argument("--vor", type=float, default=15.0, help="ms vor dem Onset")
-    p.add_argument("--lernrate", type=float, default=2e-3)
-    p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--kein-bild", action="store_true")
+    p.add_argument("--epochen", type=int, default=80, help="Anzahl Epochen (Standard 80)")
+    p.add_argument("--segment", type=float, default=None,
+                   help="Segmentlaenge in ms (Vorgabe: segment_ms aus config.json)")
+    p.add_argument("--vor", type=float, default=None,
+                   help="ms vor dem Onset (Vorgabe: segment_vor_onset_ms aus "
+                        "config.json)")
+    p.add_argument("--lernrate", type=float, default=2e-3, help="Lernrate fuer AdamW")
+    p.add_argument("--seed", type=int, default=1,
+                   help="Startwert fuer Zufall - gleicher Seed, gleiches Ergebnis")
+    p.add_argument("--kein-bild", action="store_true",
+                   help="keine Hochformat-Grafiken nach ausgabe/ schreiben")
     p.add_argument("--test", action="store_true",
                    help="nicht trainieren, sondern das neueste Modell auf der "
                         "Testsitzung pruefen")
     args = p.parse_args()
-    cfg = Config.laden()   # setzt die gewaehlten Klassen
+    cfg = laden_oder_beenden()   # setzt die gewaehlten Klassen
 
     if args.test:
+        if training.neuestes_modell() is None:
+            print(f"{ROT}Es gibt noch kein trainiertes Modell.{AUS}")
+            print(f"{GRAU}Erst trainieren: python werkzeuge/07_training.py{AUS}")
+            return 1
         try:
             t = training.teste()
         except (training.DatenFehler, ValueError) as fehler:
@@ -78,45 +100,68 @@ def main() -> int:
               f"({t.faktor:.1f}-fach ueber Zufall von {zufall() * 100:.1f} %)")
         if t.val_quote is not None:
             print(f"Validation  {t.val_quote * 100:.1f} %   (zum Vergleich)")
+        if t.hinweis:
+            print(f"{GELB}{t.hinweis}{AUS}")
         print("\nJe Klasse:")
         je_klasse_zeilen(t.je_klasse)
         print(f"\nGespeichert: {t.pfad}")
+        if not args.kein_bild:
+            # Eigener Name, damit die Test-Matrix nicht mit der Val-Matrix
+            # aus dem Training (08_confusion) verwechselt wird.
+            fig = plots.konfusionsmatrix(t.konfusion, t.quote)
+            print(f"Bild:        "
+                  f"{portrait.exportiere(fig, '08b_confusion_test', '04_modell')}")
         return 0
 
     if args.rollen:
         print("Sitzungen und ihre Rollen:\n")
         print(datensatz.uebersicht())
-        print(f"\n{GRAU}Zuordnen mit: python werkzeuge/04_sitzungen.py "
-              f"--rolle <ID>=train{AUS}")
+        print()
+        naechster_schritt()
         return 0
 
+    segment = cfg.segment_ms if args.segment is None else args.segment
+    vor = cfg.segment_vor_onset_ms if args.vor is None else args.vor
     fenster_ms = cfg.pre_roll_ms + cfg.post_roll_ms
+    # Untergrenze in Samples wie beim Schnitt: drei Pooling-Stufen brauchen
+    # mindestens 8 Mel-Rahmen, sonst stuerzt das Netz ab.
+    n_min = cfg.mel_nfft + 7 * cfg.mel_hop
+    min_ms = training.mindest_segment_ms(datensatz.merkmale_von(cfg))
     if args.epochen < 1:
         print(f"{ROT}--epochen muss mindestens 1 sein.{AUS}")
         return 1
-    if not 20 <= args.segment <= fenster_ms - args.vor:
-        print(f"{ROT}--segment muss zwischen 20 und {fenster_ms - args.vor:.0f} ms "
-              f"liegen - laenger als das aufgenommene Fenster geht nicht.{AUS}")
+    if (int(segment / 1000 * cfg.samplerate) < n_min
+            or segment > fenster_ms - vor):
+        # Ohne --segment kommt der Wert aus config.json - dann dort ansetzen
+        quelle = "--segment" if args.segment is not None else "segment_ms in config.json"
+        print(f"{ROT}{quelle} muss zwischen {min_ms:g} und {fenster_ms - vor:.0f} ms "
+              f"liegen - kuerzer reicht dem Netz bei {cfg.samplerate} Hz nicht, "
+              f"laenger als das aufgenommene Fenster geht nicht.{AUS}")
         return 1
 
     try:
-        train, val = training.pruefe_daten(args.segment, args.vor)
+        train, val = training.pruefe_daten(segment, vor)
     except training.DatenFehler as fehler:
         print(f"{ROT}{fehler}{AUS}\n")
         print(datensatz.uebersicht())
-        print(f"\n{GRAU}Zuordnen mit: python werkzeuge/04_sitzungen.py "
-              f"--rolle <ID>=train{AUS}")
+        print()
+        naechster_schritt()
+        return 1
+    except ValueError as fehler:
+        # Klassenwechsel, gemischte Abtastraten, zu langes Segment - die
+        # Meldung erklaert es selbst, eine Rollenuebersicht hilft da nicht.
+        print(f"{ROT}{fehler}{AUS}")
         return 1
 
     print(f"Training    {len(train):>4} Proben aus {sorted(set(train.sitzungen))}")
     print(f"Validation  {len(val):>4} Proben aus {sorted(set(val.sitzungen))}")
     print(f"Eingang     {train.x.shape[1]} Mel-Baender x {train.x.shape[2]} Zeitschritte"
-          f"   ({args.segment:.0f} ms ab Onset -{args.vor:.0f} ms)")
+          f"   ({segment:g} ms ab Onset -{vor:g} ms)")
     print(f"Klassen     {len(TASTEN)}   ({' '.join(anzeige(t) for t in TASTEN)})")
     print(f"Zufall      {zufall() * 100:.1f} %\n")
 
     ergebnis = None
-    for stand in training.trainiere(args.epochen, args.segment, args.vor,
+    for stand in training.trainiere(args.epochen, segment, vor,
                                     args.lernrate, args.seed):
         if isinstance(stand, training.Ergebnis):
             ergebnis = stand

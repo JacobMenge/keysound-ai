@@ -60,6 +60,25 @@ def mel_filterbank(sr: int, nfft: int, n_mels: int, fmin: float, fmax: float) ->
     return bank
 
 
+def umrechnen(x: np.ndarray, sr_ein: int, sr_aus: int) -> np.ndarray:
+    """Signal auf eine andere Abtastrate bringen.
+
+    Ein Modell hat seine Mel-Bilder bei einer festen Abtastrate gelernt. Bei
+    einer anderen Rate waere dasselbe Segment ein anders breites Bild mit
+    anders verteilten Frequenzen - das Netz nimmt es wegen des adaptiven
+    Poolings trotzdem an und liegt dann einfach haeufiger falsch. Deshalb
+    wird vorher umgerechnet statt still mit falschen Merkmalen gerechnet.
+    """
+    if int(sr_ein) == int(sr_aus):
+        return x
+    from math import gcd
+
+    from scipy.signal import resample_poly
+
+    g = gcd(int(sr_aus), int(sr_ein))
+    return resample_poly(x, int(sr_aus) // g, int(sr_ein) // g).astype(np.float32)
+
+
 def log_mel(x: np.ndarray, sr: int, nfft: int = 512, hop: int = 64,
             n_mels: int = 64, fmin: float = 100.0, fmax: float | None = None,
             boden_db: float = -100.0) -> np.ndarray:

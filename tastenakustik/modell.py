@@ -2,8 +2,8 @@
 
 Bewusst klein gehalten: ein paar hundert Trainingsproben sind wenig, und ein
 grosses Netz wuerde sie schlicht auswendig lernen. Drei Faltungsbloecke, danach
-ein Mittelwert ueber die Zeit und eine lineare Schicht auf genau so viele
-Ausgaenge, wie es Klassen gibt.
+ein Mittelwert ueber die ganze Merkmalskarte (Zeit und Frequenz) und eine
+lineare Schicht auf genau so viele Ausgaenge, wie es Klassen gibt.
 
 Die Ausgabemenge ist damit auf die gewaehlten Klassen verdrahtet. Etwas anderes
 kann dieses Modell nicht vorhersagen - das ist keine Einstellung, sondern die
