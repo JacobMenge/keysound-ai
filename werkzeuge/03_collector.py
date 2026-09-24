@@ -13,10 +13,14 @@ Grenzen, die im Code verankert sind:
   * Gespeichert wird ausschliesslich ein Fenster um einen Anschlag, der zu dem
     gerade angezeigten Prompt passt.
   * Die Promptfolge ist zufaellig. Ist in der Konfiguration eine Sperrfolge
-    gesetzt, kommt sie nie zusammenhaengend vor - geprueft vor jedem Lauf.
+    gesetzt, kommt sie nie zusammenhaengend vor - schon beim Ziehen der Folge
+    ausgeschlossen und vor jedem Lauf noch einmal geprueft.
 
 Das Fenster ist 1080 x 1920 gross und legt sich von selbst auf einen
 Hochformat-Monitor, falls einer vorhanden ist.
+
+Die Steuertasten (Esc, F7-F9) liegen bewusst ausserhalb jeder moeglichen
+Klasse - hier kann nichts mit einer aufzunehmenden Taste kollidieren.
 
 Aufruf:
     python werkzeuge/03_collector.py
@@ -26,6 +30,7 @@ Aufruf:
 Tasten im Fenster:
     die gewaehlten Klassen  Probe aufnehmen
     Esc                     pausieren / fortsetzen
+    F7                      Buehne: Sitzungskennung und Hinweise ausblenden
     F8                      Sicherheitszonen fuer Shorts / Reels einblenden
     F9                      aktuelle Ansicht nach ausgabe/ speichern
 """
@@ -46,10 +51,12 @@ import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from tastenakustik import audio, features, onset, portrait, storage, theme
+from tastenakustik import audio, bedienung, features, onset, portrait, storage, theme
 from tastenakustik.config import (
     Config,
+    KlassenFehler,
     TASTEN,
+    anzeige,
     beiname,
     ist_demo_taste,
     pruefe_keine_sperrfolge,
@@ -69,7 +76,8 @@ H_FORTSCHRITT = 300
 H_FUSS = 170
 
 
-def erzeuge_folge(ziel: int, rng: random.Random, sperrfolge: str = "") -> list[str]:
+def erzeuge_folge(ziel: int, rng: random.Random, sperrfolge: str = "",
+                  versuche: int = 200) -> list[str]:
     """Ausgewogene, gemischte Promptfolge - hoechstens zwei gleiche in Reihe.
 
     Zufaellige Reihenfolge ist zwingend: Wuerden wir alle A hintereinander
@@ -77,18 +85,46 @@ def erzeuge_folge(ziel: int, rng: random.Random, sperrfolge: str = "") -> list[s
     Drift (Handhaltung, Raum, Pegel) statt vom Tastenklang.
 
     Wer eine Sperrfolge gesetzt hat, will dieses Wort spaeter blind testen -
-    dann darf es hier nicht zusammenhaengend vorkommen.
+    dann darf es hier nicht zusammenhaengend vorkommen. Die Folge wird deshalb
+    Zeichen fuer Zeichen gezogen und laesst dabei nichts zu, was eine
+    Dreierreihe oder die Sperrfolge vollenden wuerde. Einfach mischen und
+    hinterher pruefen reicht nicht: Bei einem kurzen Wort steckt es in einer
+    Folge von einigen hundert Zeichen fast immer irgendwo drin.
     """
-    folge = [t for t in TASTEN for _ in range(ziel)]
-    rng.shuffle(folge)
-    for i in range(2, len(folge)):
-        if folge[i] == folge[i - 1] == folge[i - 2]:
-            for j in range(i + 1, len(folge)):
-                if folge[j] != folge[i]:
-                    folge[i], folge[j] = folge[j], folge[i]
-                    break
-    pruefe_keine_sperrfolge(folge, sperrfolge)
-    return folge
+    sperre = (sperrfolge or "").lower()
+    if sperre and any(c not in TASTEN for c in sperre):
+        sperre = ""                   # kann ohnehin nie vorkommen
+    if len(sperre) == 1:
+        raise KlassenFehler(
+            f"Die Sperrfolge {sperre!r} ist ein einzelnes Zeichen - das laesst "
+            "sich nicht aufnehmen, ohne es zu verwenden.")
+
+    gesamt = ziel * len(TASTEN)
+    for _ in range(versuche):
+        rest = {t: ziel for t in TASTEN}
+        folge: list[str] = []
+        while len(folge) < gesamt:
+            kandidaten = [t for t, n in rest.items() if n > 0]
+            if len(folge) >= 2 and folge[-1] == folge[-2]:
+                kandidaten = [t for t in kandidaten if t != folge[-1]]
+            if sperre:
+                ende = "".join(folge[len(folge) - len(sperre) + 1:])
+                if len(ende) == len(sperre) - 1:
+                    kandidaten = [t for t in kandidaten if ende + t != sperre]
+            if not kandidaten:
+                break                 # festgefahren - neu ziehen
+            # Nach verbleibender Anzahl gewichtet: ohne Nebenbedingungen ist
+            # das genau eine gleichverteilte Mischung.
+            wahl = rng.choices(kandidaten, weights=[rest[t] for t in kandidaten])[0]
+            folge.append(wahl)
+            rest[wahl] -= 1
+        if len(folge) == gesamt:
+            pruefe_keine_sperrfolge(folge, sperre)
+            return folge
+    raise KlassenFehler(
+        f"Mit den Klassen {''.join(TASTEN)} laesst sich keine Aufnahmefolge "
+        f"bilden, in der {sperrfolge!r} nicht vorkommt. Eine laengere "
+        "Sperrfolge waehlen oder sie in Schritt 2 leeren.")
 
 
 def rundes_rechteck(canvas: tk.Canvas, x0, y0, x1, y1, r, **kw):
@@ -120,10 +156,17 @@ class Collector(tk.Tk):
         self.falsche = 0
         self.letztes_fenster: np.ndarray | None = None
         self.zonen: list[tk.Frame] = []
+        self.vor_pause = ""           # Zustand, in dem pausiert wurde
+        self.prompt_offen = False     # naechster Prompt kam waehrend der Pause
+        self.l_startfehler: tk.Label | None = None
 
         self.title("Guided Collector - Tastenakustik")
         self.configure(bg=theme.BG)
         self.s = portrait.fenster_einrichten(self)
+        # Windows-Skalierung (125 %, 150 %): Matplotlib vergroessert die
+        # eingebettete Figur um diesen Faktor, Tk die Schrift in Punkt. Beides
+        # wird herausgerechnet, sonst laeuft das Layout unten aus dem Fenster.
+        self.pixelfaktor = bedienung.pixelfaktor(self)
         self.protocol("WM_DELETE_WINDOW", self._schliessen)
 
         self._schriften()
@@ -138,17 +181,27 @@ class Collector(tk.Tk):
         return max(int(round(wert * self.s)), 1)
 
     def pt(self, wert: float) -> int:
+        """Schriftgroesse in Punkt fuer die Matplotlib-Figur."""
         return max(int(round(wert * self.s)), 6)
+
+    def schrift(self, wert: float) -> int:
+        """Schriftgroesse fuer Tk - in Pixeln, damit sie zum Layout passt.
+
+        Tk rechnet Punkt mit der Windows-Skalierung in Pixel um, das Layout
+        hier ist aber in echten Pixeln gebaut. Negative Groessen sind in Tk
+        Pixelangaben; bei 100 % Skalierung kommt dasselbe heraus wie vorher.
+        """
+        return -max(int(round(wert * self.s * 96 / 72)), 8)
 
     def _schriften(self) -> None:
         fam = "Segoe UI" if "Segoe UI" in tkfont.families() else "Arial"
         self.fam = fam
-        self.f_titel = tkfont.Font(family=fam, size=self.pt(30), weight="bold")
-        self.f_normal = tkfont.Font(family=fam, size=self.pt(14))
-        self.f_klein = tkfont.Font(family=fam, size=self.pt(12))
-        self.f_mono = tkfont.Font(family="Consolas", size=self.pt(13))
-        self.f_label = tkfont.Font(family=fam, size=self.pt(17))
-        self.f_status = tkfont.Font(family=fam, size=self.pt(18), weight="bold")
+        self.f_titel = tkfont.Font(family=fam, size=self.schrift(30), weight="bold")
+        self.f_normal = tkfont.Font(family=fam, size=self.schrift(14))
+        self.f_klein = tkfont.Font(family=fam, size=self.schrift(12))
+        self.f_mono = tkfont.Font(family="Consolas", size=self.schrift(13))
+        self.f_label = tkfont.Font(family=fam, size=self.schrift(17))
+        self.f_status = tkfont.Font(family=fam, size=self.schrift(18), weight="bold")
 
     # -- Startansicht ---------------------------------------------------
     def _startansicht(self) -> None:
@@ -164,11 +217,11 @@ class Collector(tk.Tk):
         leiste.pack(anchor="w", pady=(self.px(24), self.px(28)))
         pro_zeile = 13 if len(TASTEN) > 8 else 8
         kachel = tkfont.Font(family=self.fam,
-                             size=self.pt(20 if len(TASTEN) <= 8 else 15),
+                             size=self.schrift(20 if len(TASTEN) <= 8 else 15),
                              weight="bold")
         for i, taste in enumerate(TASTEN):
             zeile, spalte = divmod(i, pro_zeile)
-            tk.Label(leiste, text=taste.upper(), font=kachel,
+            tk.Label(leiste, text=anzeige(taste), font=kachel,
                      bg=theme.farbe(taste), fg=theme.BG,
                      width=2, pady=self.px(4)).grid(
                 row=zeile, column=spalte,
@@ -259,7 +312,7 @@ class Collector(tk.Tk):
         theme.anwenden("normal")
         breite_px = self.px(portrait.BREITE - 2 * portrait.INHALT_LINKS + 60)
         self.fig = Figure(figsize=(breite_px / 100, self.px(H_FIGUR) / 100),
-                          dpi=100, facecolor=theme.BG)
+                          dpi=100 / self.pixelfaktor, facecolor=theme.BG)
         self.ax_w = self.fig.add_subplot(2, 1, 1)
         self.ax_s = self.fig.add_subplot(2, 1, 2)
         self.fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=0.11, hspace=0.62)
@@ -327,7 +380,7 @@ class Collector(tk.Tk):
         mitte = breite / 2
 
         c.create_text(mitte, self.px(44), text="DRÜCKE", fill=theme.TEXT_SCHWACH,
-                      font=(self.fam, self.pt(22)))
+                      font=(self.fam, self.schrift(22)))
         if not self.aktuelle_taste:
             return
         farbe = theme.farbe(self.aktuelle_taste)
@@ -335,25 +388,41 @@ class Collector(tk.Tk):
         oben = self.px(90)
         rundes_rechteck(c, mitte - kante / 2, oben, mitte + kante / 2, oben + kante,
                         self.px(46), fill=farbe, outline="")
-        c.create_text(mitte, oben + kante / 2, text=self.aktuelle_taste.upper(),
-                      fill=theme.BG, font=(self.fam, self.pt(160), "bold"))
+        c.create_text(mitte, oben + kante / 2, text=anzeige(self.aktuelle_taste),
+                      fill=theme.BG, font=(self.fam, self.schrift(160), "bold"))
         name = beiname(self.aktuelle_taste)
         if name:
             c.create_text(mitte, oben + kante + self.px(36), text=name, fill=farbe,
-                          font=(self.fam, self.pt(20), "bold"))
+                          font=(self.fam, self.schrift(20), "bold"))
 
     # -- Ablauf ---------------------------------------------------------
+    def _startfehler(self, text: str) -> None:
+        """Grund anzeigen, warum die Aufnahme nicht startet - immer an einer Stelle."""
+        if self.l_startfehler is None:
+            self.l_startfehler = tk.Label(
+                self.start, font=self.f_normal, bg=theme.BG, fg=theme.FEHLER,
+                wraplength=self.px(880), justify="left")
+            self.l_startfehler.pack(anchor="w", pady=(self.px(18), 0))
+        self.l_startfehler.configure(text=text)
+
     def _starten(self) -> None:
+        if self.zustand != "start":
+            return
         try:
             self.ziel = max(1, int(self.ziel_var.get()))
         except ValueError:
             self.ziel = 40
+        # Erst die Folge, dann das Mikrofon, dann der Sitzungsordner: Scheitert
+        # ein Schritt, bleibt kein leerer Sitzungsordner in daten/roh/ liegen.
+        try:
+            folge = erzeuge_folge(self.ziel, self.rng, self.cfg.sperrfolge)
+        except KlassenFehler as exc:
+            self._startfehler(str(exc))
+            return
         try:
             self.ring.start()
         except RuntimeError as exc:
-            tk.Label(self.start, text=str(exc), font=self.f_normal, bg=theme.BG,
-                     fg=theme.FEHLER, wraplength=self.px(880),
-                     justify="left").pack(anchor="w", pady=(self.px(18), 0))
+            self._startfehler(str(exc))
             return
 
         self.sitzung = storage.Sitzung(
@@ -362,7 +431,7 @@ class Collector(tk.Tk):
             tastatur=self.felder["tastatur"].get().strip(),
             mikrofon_position=self.felder["mikrofon_position"].get().strip(),
         )
-        self.warteschlange = erzeuge_folge(self.ziel, self.rng, self.cfg.sperrfolge)
+        self.warteschlange = folge
         self.t_start = time.perf_counter()
         self.start.pack_forget()
         self.mess.pack(fill="both", expand=True)
@@ -375,6 +444,11 @@ class Collector(tk.Tk):
         self.after(1500, self._fokus_pruefen)
 
     def _naechster_prompt(self) -> None:
+        if self.zustand in ("pause", "fertig"):
+            # Pausiert in der kurzen Wartezeit nach einer Probe: Der naechste
+            # Prompt darf die Pause nicht aufheben - er kommt beim Fortsetzen.
+            self.prompt_offen = self.zustand == "pause"
+            return
         if not self.warteschlange:
             self._fertig()
             return
@@ -411,7 +485,7 @@ class Collector(tk.Tk):
             return
         if zeichen != self.aktuelle_taste:
             self.falsche += 1
-            self._status(f"{zeichen.upper()} statt {self.aktuelle_taste.upper()} "
+            self._status(f"{anzeige(zeichen)} statt {anzeige(self.aktuelle_taste)} "
                          f"- nichts gespeichert", theme.WARN)
             return
 
@@ -489,7 +563,7 @@ class Collector(tk.Tk):
             self.ax_w.axvline(t_on, color=theme.AKZENT2, lw=2.0)
             s0, s1 = onset.segment_grenzen(anschlag, fenster.size, self.cfg)
             self.ax_w.axvspan(t[s0], t[min(s1, t.size - 1)], color=theme.AKZENT2, alpha=0.12)
-        self.ax_w.set_title(f"{self.aktuelle_taste.upper()}  -  aufgenommenes Fenster",
+        self.ax_w.set_title(f"{anzeige(self.aktuelle_taste)}  -  aufgenommenes Fenster",
                             fontsize=self.pt(11))
         self.ax_w.set_xlim(t[0], t[-1])
         self.ax_w.tick_params(labelsize=self.pt(9))
@@ -536,8 +610,8 @@ class Collector(tk.Tk):
             feld = self.px(34 if gross else 24)
             rundes_rechteck(c, x0, y - feld / 2, x0 + feld, y + feld / 2,
                             self.px(8), fill=farbe, outline="")
-            c.create_text(x0 + feld / 2, y, text=taste.upper(), fill=theme.BG,
-                          font=(self.fam, self.pt(15 if gross else 11), "bold"))
+            c.create_text(x0 + feld / 2, y, text=anzeige(taste), fill=theme.BG,
+                          font=(self.fam, self.schrift(15 if gross else 11), "bold"))
             zaehler_x = x0 + feld + self.px(14)
             if mit_balken:
                 bx0 = zaehler_x
@@ -552,7 +626,7 @@ class Collector(tk.Tk):
                 zaehler_x = bx1 + self.px(12)
             c.create_text(zaehler_x, y, text=f"{n}/{self.ziel}", anchor="w",
                           fill=theme.TEXT if n >= self.ziel else theme.TEXT_SCHWACH,
-                          font=("Consolas", self.pt(13 if gross else 10)))
+                          font=("Consolas", self.schrift(13 if gross else 10)))
 
         gesamt = self.sitzung.gesamt
         soll = self.ziel * len(TASTEN)
@@ -567,14 +641,29 @@ class Collector(tk.Tk):
 
     # -- Steuerung ------------------------------------------------------
     def _pause_umschalten(self) -> None:
-        if self.zustand == "fertig":
+        # Auf der Startseite gibt es nichts zu pausieren - Esc beim Ausfuellen
+        # der Felder darf den Zustand nicht verstellen.
+        if self.zustand in ("start", "fertig"):
             return
         if self.zustand == "pause":
-            self.ring.start()
-            self.zustand = "warte"
+            try:
+                self.ring.start()
+            except RuntimeError as exc:
+                self._status(f"Mikrofon nicht verfügbar: {exc}", theme.FEHLER)
+                return
             self.b_pause.configure(text="Pause (Esc)")
             self._status("weiter", theme.TEXT_SCHWACH)
+            if self.prompt_offen:
+                self.prompt_offen = False
+                self.zustand = "verarbeitet"
+                self._naechster_prompt()
+            elif self.vor_pause == "verarbeitet":
+                # Der naechste Prompt ist schon angesetzt und kommt gleich.
+                self.zustand = "verarbeitet"
+            else:
+                self.zustand = "warte"
         else:
+            self.vor_pause = self.zustand
             self.ring.stop()
             self.zustand = "pause"
             self.b_pause.configure(text="Weiter (Esc)")
@@ -625,7 +714,7 @@ class Collector(tk.Tk):
         self.prompt.delete("all")
         self.prompt.create_text(
             self.prompt.winfo_width() / 2, self.px(H_PROMPT) / 2, text="✓",
-            fill=theme.OK, font=(self.fam, self.pt(140), "bold"))
+            fill=theme.OK, font=(self.fam, self.schrift(140), "bold"))
         self._status("Alle Ziele erreicht - Sitzung gespeichert", theme.OK)
         self._rec_anzeige()
         self._bericht()
@@ -653,7 +742,7 @@ class Collector(tk.Tk):
         print(f"  Ordner      {s.ordner}")
         print(f"  Proben      {s.gesamt}")
         for taste in TASTEN:
-            print(f"    {taste.upper()}  {s.zaehler[taste]:3d}")
+            print(f"    {anzeige(taste)}  {s.zaehler[taste]:3d}")
         if s.verworfen:
             print("  verworfen   " + ", ".join(f"{k}: {v}" for k, v in s.verworfen.items()))
         print(f"  falsche Taste {self.falsche}")
