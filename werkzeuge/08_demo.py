@@ -7,7 +7,9 @@ Aufnehmen die Onsets nachmisst.
 
 Damit ist die Trennung nicht nur eine Absichtserklaerung, sondern eine
 Eigenschaft des Programms: Es gibt hier gar keine Stelle, an der die
-tatsaechlich gedrueckte Taste bekannt waere.
+tatsaechlich gedrueckte Taste bekannt waere. Das gilt auch fuer die Bedienung
+- sie laeuft nur ueber die Maus, damit beim Testen jede Taste frei ist (siehe
+tastenakustik/bedienung.py).
 
 Der optionale Vergleichstext (--soll) dient nur der Anzeige, wie viele Zeichen
 getroffen wurden. Er beeinflusst die Vorhersage an keiner Stelle - er wird
@@ -16,13 +18,13 @@ erst nach der Klassifikation herangezogen.
 Aufruf:
     python werkzeuge/08_demo.py
     python werkzeuge/08_demo.py --soll hallo
-    python werkzeuge/08_demo.py --buehne          # ohne Bedienhinweise
+    python werkzeuge/08_demo.py --buehne          # ohne Titel und Knopfleiste
 
-Tasten im Fenster:
-    r  Zeichenfolge zuruecksetzen
-    b  Buehne an/aus
-    s  Standbild nach ausgabe/
-    q  beenden
+Bedienung mit der Maus - Knoepfe unter dem Bild oder Rechtsklick ins Bild:
+    Zuruecksetzen   Zeichenfolge leeren
+    Buehne          Titel und Knopfleiste aus- und einblenden
+    Standbild       aktuelles Bild nach ausgabe/05_demo/
+    Beenden
 """
 
 from __future__ import annotations
@@ -46,7 +48,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import torch  # noqa: E402
 from matplotlib.patches import FancyBboxPatch, Polygon  # noqa: E402
 
-from tastenakustik import audio, datensatz, features, modell, onset, theme  # noqa: E402
+from tastenakustik import (audio, bedienung, datensatz, features, modell,  # noqa: E402
+                           onset, theme)
 from tastenakustik.config import DATEN, TASTEN, Config, anzeige, setze_klassen  # noqa: E402
 
 BILDRATE = 30
@@ -96,7 +99,10 @@ class Demo:
         self.erkannt_gesamt = 0
 
         self.ring = audio.Ringpuffer(cfg)
-        self.gefunden: list[str] = []          # vorhergesagte Zeichen
+        # Alle vorhergesagten Zeichen seit dem letzten Zuruecksetzen. Angezeigt
+        # werden nur die letzten MAX_ZEICHEN, verglichen wird mit allen - sonst
+        # rutscht der Vergleich mit dem Zieltext nach dem 16. Zeichen weg.
+        self.gefunden: list[str] = []
         self.letzte_p = {t: 0.0 for t in TASTEN}
         self.letzte_taste = ""
         self.verarbeitet_bis = 0               # absoluter Sample-Index
@@ -110,9 +116,11 @@ class Demo:
     # -- Aufbau ---------------------------------------------------------
     def _baue_figur(self) -> None:
         theme.anwenden("hochformat")
+        bedienung.tastenkuerzel_aus()
+        self.masse = bedienung.LiveMasse()
         self.fig = plt.figure(
             figsize=(portrait.BREITE / portrait.DPI, portrait.HOEHE / portrait.DPI),
-            dpi=portrait.DPI, facecolor=theme.BG)
+            dpi=self.masse.dpi, facecolor=theme.BG)
         self.fig.canvas.manager.set_window_title("Live-Demo - Tastenakustik")
         P = portrait
 
@@ -196,10 +204,16 @@ class Demo:
             P.x(P.INHALT_LINKS), P.y(1500), "", fontsize=P.S_TICK,
             color=theme.TEXT_SCHWACH, va="center")
 
-        self.chrome = [self.kopf, portrait.fuss(
-            self.fig, "r  zuruecksetzen      b  Buehne      s  Standbild      q  beenden")]
+        self.chrome = [self.kopf]
+        # Bedient wird nur mit der Maus. Beim Live-Test soll jede Taste frei
+        # sein - auch s, q, f, l und k, die Matplotlib sonst selbst belegt.
+        self.bedienung = bedienung.Bedienung(self.fig, [
+            ("Zurücksetzen", self._zuruecksetzen),
+            ("Bühne", self._buehne_umschalten),
+            ("Standbild", self._standbild),
+            ("Beenden", self._beenden),
+        ], breite=round(portrait.BREITE * self.masse.skala))
         self._setze_buehne()
-        self.fig.canvas.mpl_connect("key_press_event", self._taste)
         self.fig.canvas.mpl_connect("close_event", lambda _e: self.ring.stop())
         self.fig.canvas.mpl_connect(
             "draw_event", lambda _e: setattr(self, "_hintergrund", None))
@@ -208,6 +222,7 @@ class Demo:
         for a in self.chrome:
             if a is not None:
                 a.set_visible(not self.buehne)
+        self.bedienung.zeigen(not self.buehne)
         self.fig.canvas.draw_idle()
 
     # -- Erkennung ------------------------------------------------------
@@ -277,7 +292,6 @@ class Demo:
         self.letzte_p = {t: float(v) for t, v in zip(TASTEN, p)}
         self.letzte_taste = TASTEN[int(p.argmax())]
         self.gefunden.append(self.letzte_taste)
-        self.gefunden = self.gefunden[-MAX_ZEICHEN:]
         if self.mitschnitt:
             import soundfile as sf
             ziel = DATEN / "demo_mitschnitt"
@@ -336,30 +350,47 @@ class Demo:
                 f"{self.letzte_p[self.letzte_taste] * 100:.0f}%")
             self.ergebnis_text.set_color(theme.BG)
 
-        text = "".join(self.gefunden).upper()
+        text = "".join(anzeige(t) for t in self.gefunden[-MAX_ZEICHEN:])
         self.zeichen_text.set_text(text)
         if self.soll:
-            n_treffer = sum(1 for a, b in zip(self.gefunden, self.soll) if a == b)
+            n_treffer, n_verglichen = self.treffer()
             self.treffer_text.set_text(
-                f"{n_treffer} von {len(self.gefunden)} richtig   "
+                f"{n_treffer} von {n_verglichen} richtig   "
                 f"(Ziel: {self.soll.upper()})")
+        else:
+            self.treffer_text.set_text("")
         return struktur
 
-    # -- Betrieb --------------------------------------------------------
-    def _taste(self, event) -> None:  # noqa: ANN001
-        if event.key == "r":
-            self.gefunden.clear()
-            self.letzte_taste = ""
-            self.letzte_p = {t: 0.0 for t in TASTEN}
-            self.verarbeitet_bis = self.ring.gesamt
-        elif event.key == "b":
-            self.buehne = not self.buehne
-            self._setze_buehne()
-        elif event.key == "s":
-            print(f"gespeichert: {portrait.exportiere(self.fig, 'demo', '05_demo')}")
-        elif event.key in ("q", "escape"):
-            self._laufen = False
-            plt.close(self.fig)
+    def treffer(self) -> tuple[int, int]:
+        """(richtig, verglichen) - Zeichen fuer Zeichen gegen den Zieltext.
+
+        Verglichen wird nur, wofuer es ein Zielzeichen gibt: Wer ueber das
+        Zielwort hinaus weitertippt, verschlechtert damit nicht die Quote.
+        """
+        n_treffer = sum(1 for a, b in zip(self.gefunden, self.soll) if a == b)
+        return n_treffer, min(len(self.gefunden), len(self.soll))
+
+    # -- Bedienung (nur Maus) -------------------------------------------
+    def _zuruecksetzen(self) -> None:
+        self.gefunden.clear()
+        self.letzte_taste = ""
+        self.letzte_p = {t: 0.0 for t in TASTEN}
+        self.verarbeitet_bis = self.ring.gesamt
+        self.ergebnis_feld.set_facecolor(theme.PANEL)
+        self.ergebnis_text.set_text("")
+
+    def _buehne_umschalten(self) -> None:
+        self.buehne = not self.buehne
+        self._setze_buehne()
+
+    def _standbild(self) -> None:
+        pfad = portrait.exportiere(self.fig, "demo", "05_demo")
+        print(f"gespeichert: {pfad}")
+        self.bedienung.melde("Standbild gespeichert")
+
+    def _beenden(self) -> None:
+        self._laufen = False
+        plt.close(self.fig)
 
     def _takt(self) -> None:
         if not self._laufen:
@@ -383,11 +414,8 @@ class Demo:
 
     def starten(self) -> None:
         self.ring.start()
-        try:
-            _b, _h, px, py, _ = portrait.fensterplatz(rand=90)
-            self.fig.canvas.manager.window.wm_geometry(f"+{px}+{py}")
-        except Exception:  # noqa: BLE001
-            pass
+        self.masse.platzieren(self.fig.canvas.manager.window,
+                              self.bedienung.hoehe())
         self.verarbeitet_bis = 0
         self.fig.canvas.draw()
         self._naechstes = time.perf_counter()
@@ -398,11 +426,11 @@ class Demo:
             self._laufen = False
             self.ring.stop()
             if self.gefunden:
-                print("\nErkannt:", "".join(self.gefunden).upper())
+                print("\nErkannt:", "".join(anzeige(t) for t in self.gefunden))
                 if self.soll:
-                    n = sum(1 for a, b in zip(self.gefunden, self.soll) if a == b)
+                    n, verglichen = self.treffer()
                     print(f"Ziel:    {self.soll.upper()}")
-                    print(f"Treffer: {n} von {len(self.gefunden)}")
+                    print(f"Treffer: {n} von {verglichen}")
 
 
 def main() -> int:
@@ -453,8 +481,16 @@ def main() -> int:
     print(f"Sperrzeit nach einem Anschlag: {MIN_ABSTAND_MS:.0f} ms")
     print(f"Mindestpegel eines Anschlags:  {args.schwelle:.0f} dBFS")
     print()
-    Demo(cfg, netz, stand, args.soll, args.buehne, args.mitschnitt,
-         args.schwelle).starten()
+    demo = Demo(cfg, netz, stand, args.soll, args.buehne, args.mitschnitt,
+                args.schwelle)
+    try:
+        demo.starten()
+    except RuntimeError as fehler:
+        # Meist ist das Mikrofon belegt oder abgezogen - dann klar sagen,
+        # statt mit einem Traceback und einem leeren Fenster zu enden.
+        plt.close(demo.fig)
+        print(fehler)
+        return 1
     return 0
 
 

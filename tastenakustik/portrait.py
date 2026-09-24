@@ -267,16 +267,15 @@ def arbeitsflaechen() -> list[tuple[int, int, int, int]]:
     return gefunden
 
 
-def fensterplatz(rand: int = 24) -> tuple[int, int, int, int, float]:
-    """Groesse und Position eines 9:16-Fensters.
+def beste_flaeche(rand: int = 24) -> tuple[int, int, int, int] | None:
+    """Arbeitsflaeche des Monitors, auf den ein 9:16-Fenster am besten passt.
 
-    Gibt (breite, hoehe, x, y, skala) zurueck. skala ist 1.0, wenn echte
-    1080 x 1920 Pixel moeglich sind, sonst der Verkleinerungsfaktor, mit dem
-    Schriften und Abstaende mitwachsen muessen.
+    Bevorzugt wird ein Monitor, auf dem echte 1080 x 1920 Pixel gehen, danach
+    einer im Hochformat. None, wenn sich die Monitore nicht abfragen lassen.
     """
     flaechen = arbeitsflaechen()
     if not flaechen:
-        return BREITE, HOEHE, 40, 20, 1.0
+        return None
 
     def bewertung(f: tuple[int, int, int, int]) -> tuple[int, int]:
         _, _, b, h = f
@@ -284,7 +283,21 @@ def fensterplatz(rand: int = 24) -> tuple[int, int, int, int, float]:
         hochformat = h > b
         return (not passt_nativ, not hochformat)
 
-    x0, y0, b, h = sorted(flaechen, key=bewertung)[0]
+    return sorted(flaechen, key=bewertung)[0]
+
+
+def fensterplatz(rand: int = 24) -> tuple[int, int, int, int, float]:
+    """Groesse und Position eines 9:16-Fensters.
+
+    Gibt (breite, hoehe, x, y, skala) zurueck. skala ist 1.0, wenn echte
+    1080 x 1920 Pixel moeglich sind, sonst der Verkleinerungsfaktor, mit dem
+    Schriften und Abstaende mitwachsen muessen.
+    """
+    flaeche = beste_flaeche(rand)
+    if flaeche is None:
+        return BREITE, HOEHE, 40, 20, 1.0
+
+    x0, y0, b, h = flaeche
     if b >= BREITE and h >= HOEHE + rand:
         breite, hoehe, skala = BREITE, HOEHE, 1.0
     else:

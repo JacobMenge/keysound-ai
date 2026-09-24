@@ -1,30 +1,33 @@
 """Schritt 2 - Mikrofon-Test und Live-Ansicht im Hochformat 9:16.
 
-Zwei Ansichten, umschaltbar mit 'b':
+Zwei Ansichten, umschaltbar mit dem Knopf "Bühne":
 
   Werkzeug  Alles, was beim Einstellen hilft: Kennzahlen, Bewertung,
-            Geraetename, Tastenhinweise.
+            Geraetename, Knopfleiste.
   Buehne    Fuer die Aufnahme: Wellenform, Spektrogramm und Pegel, jeweils
             mit Ueberschrift und beschrifteten Achsen. Sonst nichts.
 
 Das Fenster ist 1080 x 1920 gross und legt sich von selbst auf einen
-Hochformat-Monitor, falls einer vorhanden ist.
+Hochformat-Monitor, falls einer vorhanden ist. Passt es nirgends in voller
+Groesse hin, wird es als Ganzes verkleinert.
 
 Aufruf:
     python werkzeuge/02_kalibrierung.py
     python werkzeuge/02_kalibrierung.py --buehne
     python werkzeuge/02_kalibrierung.py --geraet 39 --sekunden 3
 
-Tasten im Fenster:
-    b  zwischen Werkzeug und Buehne umschalten
-    s  Standbild nach ausgabe/ speichern (exakt 1080 x 1920)
-    g  Sicherheitszonen fuer Shorts / Reels / TikTok einblenden
-    r  Peak-Hold und Clip-Zaehler zuruecksetzen
-    v  Skala auf Vollaussteuerung umschalten
-    Leertaste  einfrieren, q  beenden
+Bedienung mit der Maus - Knoepfe unter dem Bild oder Rechtsklick ins Bild.
+Die Tastatur bleibt frei, denn hier wird zum Pruefen getippt:
+    Buehne       zwischen Werkzeug und Buehne umschalten
+    Standbild    nach ausgabe/ speichern (exakt 1080 x 1920)
+    Zonen        Sicherheitszonen fuer Shorts / Reels / TikTok einblenden
+    Peak-Hold    Peak-Hold und Clip-Zaehler zuruecksetzen
+    Skala        auf Vollaussteuerung umschalten
+    Einfrieren   Bild anhalten und weiterlaufen lassen
+    Beenden
 
-Es wird nichts auf die Platte geschrieben ausser den Standbildern, die du mit
-'s' selbst ausloest.
+Es wird nichts auf die Platte geschrieben ausser den Standbildern, die du
+selbst ausloest.
 """
 
 from __future__ import annotations
@@ -48,7 +51,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib import colormaps  # noqa: E402
 from matplotlib.patches import Polygon  # noqa: E402
 
-from tastenakustik import audio, features, onset, theme  # noqa: E402
+from tastenakustik import audio, bedienung, features, onset, theme  # noqa: E402
 from tastenakustik.config import Config, TASTEN, verzeichnisse_anlegen  # noqa: E402
 
 NFFT = 512
@@ -108,9 +111,11 @@ class Kalibrierung:
     # -- Aufbau ---------------------------------------------------------
     def _baue_figur(self) -> None:
         theme.anwenden("hochformat")
+        bedienung.tastenkuerzel_aus()
+        self.masse = bedienung.LiveMasse()
         self.fig = plt.figure(
             figsize=(portrait.BREITE / portrait.DPI, portrait.HOEHE / portrait.DPI),
-            dpi=portrait.DPI, facecolor=theme.BG,
+            dpi=self.masse.dpi, facecolor=theme.BG,
         )
         self.fig.canvas.manager.set_window_title("Kalibrierung - Tastenakustik")
         self.t = np.linspace(-self.laenge, 0.0, int(self.laenge * self.cfg.samplerate))
@@ -189,13 +194,20 @@ class Kalibrierung:
                 portrait.x(lx), portrait.y(1414), "-", fontsize=46,
                 fontweight="bold", color=theme.TEXT, va="center")
             self.chrome.append(self.werte[schluessel])
-        self.chrome.append(portrait.fuss(
-            self.fig,
-            "b  Buehne      s  Standbild      g  Zonen      r  Peak-Hold\n"
-            "v  Skala       Leertaste  einfrieren           q  beenden"))
+
+        # Bedient wird nur mit der Maus: Zum Pruefen des Pegels wird getippt,
+        # und jede belegte Taste wuerde dabei nebenher etwas ausloesen.
+        self.bedienung = bedienung.Bedienung(self.fig, [
+            ("Bühne", self._buehne_umschalten),
+            ("Standbild", self._standbild),
+            ("Zonen", self._zonen_umschalten),
+            ("Peak-Hold", self._peak_zuruecksetzen),
+            ("Skala", self._skala_umschalten),
+            ("Einfrieren", self._einfrieren),
+            ("Beenden", self._beenden),
+        ], breite=round(portrait.BREITE * self.masse.skala))
 
         self._setze_layout()
-        self.fig.canvas.mpl_connect("key_press_event", self._taste)
         self.fig.canvas.mpl_connect("close_event", lambda _e: self.ring.stop())
         self.fig.canvas.mpl_connect(
             "draw_event", lambda _e: setattr(self, "_hintergrund", None))
@@ -215,6 +227,7 @@ class Kalibrierung:
         for artist in self.chrome:
             if artist is not None:
                 artist.set_visible(not self.buehne)
+        self.bedienung.zeigen(not self.buehne)
 
         for ax, schluessel in ((self.ax_welle, "welle"), (self.ax_spek, "spek"),
                                (self.ax_meter, "meter")):
@@ -248,36 +261,45 @@ class Kalibrierung:
         self.ax_welle.set_xticks([])
         self.fig.canvas.draw_idle()
 
-    # -- Interaktion ----------------------------------------------------
-    def _taste(self, event) -> None:  # noqa: ANN001
-        if event.key == "s":
-            print(f"gespeichert: "
-                  f"{portrait.exportiere(self.fig, 'kalibrierung', '01_kalibrierung')}")
-        elif event.key == "b":
-            self.buehne = not self.buehne
-            self._setze_layout()
-            self._animiert(self.buehne)
-            self.fig.canvas.draw()
-        elif event.key == "g":
-            self.zonen_sichtbar = not self.zonen_sichtbar
-            if self.zonen_sichtbar:
-                portrait.sicherheitszonen(self.fig)
-            else:
-                for a in [a for a in self.fig.artists if getattr(a, "zorder", 0) == 50]:
-                    a.remove()
-                for t in [t for t in self.fig.texts if getattr(t, "zorder", 0) == 51]:
-                    t.remove()
-            self.fig.canvas.draw()
-        elif event.key == "r":
-            self.peak_hold = METER_MIN
-            self.clips = 0
-        elif event.key == "v":
-            self.voll_skala = not self.voll_skala
-        elif event.key == " ":
-            self.eingefroren = not self.eingefroren
-        elif event.key in ("q", "escape"):
-            self._laufen = False
-            plt.close(self.fig)
+    # -- Bedienung (nur Maus) -------------------------------------------
+    def _standbild(self) -> None:
+        pfad = portrait.exportiere(self.fig, "kalibrierung", "01_kalibrierung")
+        print(f"gespeichert: {pfad}")
+        self.bedienung.melde("Standbild gespeichert")
+
+    def _buehne_umschalten(self) -> None:
+        self.buehne = not self.buehne
+        self._setze_layout()
+        self._animiert(self.buehne)
+        self.fig.canvas.draw()
+
+    def _zonen_umschalten(self) -> None:
+        self.zonen_sichtbar = not self.zonen_sichtbar
+        if self.zonen_sichtbar:
+            portrait.sicherheitszonen(self.fig)
+        else:
+            for a in [a for a in self.fig.artists if getattr(a, "zorder", 0) == 50]:
+                a.remove()
+            for t in [t for t in self.fig.texts if getattr(t, "zorder", 0) == 51]:
+                t.remove()
+        self._hintergrund = None
+        self.fig.canvas.draw()
+
+    def _peak_zuruecksetzen(self) -> None:
+        self.peak_hold = METER_MIN
+        self.clips = 0
+
+    def _skala_umschalten(self) -> None:
+        self.voll_skala = not self.voll_skala
+
+    def _einfrieren(self) -> None:
+        self.eingefroren = not self.eingefroren
+        self.bedienung.melde("eingefroren" if self.eingefroren else "läuft",
+                             dauer_ms=2000)
+
+    def _beenden(self) -> None:
+        self._laufen = False
+        plt.close(self.fig)
 
     # -- Aktualisierung -------------------------------------------------
     def _aktualisiere(self) -> bool:
@@ -442,11 +464,8 @@ class Kalibrierung:
 
     def starten(self) -> None:
         self.ring.start()
-        try:
-            _b, _h, px, py, _ = portrait.fensterplatz(rand=90)
-            self.fig.canvas.manager.window.wm_geometry(f"+{px}+{py}")
-        except Exception:  # noqa: BLE001
-            pass
+        self.masse.platzieren(self.fig.canvas.manager.window,
+                              self.bedienung.hoehe())
         self._animiert(self.buehne)
         self.fig.canvas.draw()
         self._naechstes = time.perf_counter()
@@ -482,8 +501,14 @@ def main() -> int:
     print(f"Geraet   {cfg.device_name} ({cfg.hostapi}, {cfg.samplerate} Hz)")
     print(f"Klassen  {'  '.join(t.upper() for t in TASTEN)}")
     print(f"Fenster  1080 x 1920, {BILDRATE} Bilder je Sekunde")
-    print("'b' schaltet zwischen Werkzeug und Buehne, 'q' beendet.\n")
-    Kalibrierung(cfg, args.sekunden, args.buehne).starten()
+    print("Bedienung mit der Maus: Knoepfe unter dem Bild oder Rechtsklick.\n")
+    kalibrierung = Kalibrierung(cfg, args.sekunden, args.buehne)
+    try:
+        kalibrierung.starten()
+    except RuntimeError as fehler:
+        plt.close(kalibrierung.fig)
+        print(fehler)
+        return 1
     return 0
 
 
