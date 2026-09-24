@@ -1,8 +1,10 @@
 # Direkte Abhaengigkeiten. Getestet mit Python 3.12 unter Windows 11.
 # Installation:  pip install -r requirements.txt
 #
-# torch kommt hier als CPU-Version - das Netz hat rund 24 000 Parameter und
-# trainiert auf einem normalen Rechner in unter zwei Minuten. Eine GPU bringt
+# torch: Unter Windows und macOS kommt hier die CPU-Version. Unter Linux holt
+# pip sonst das mehrere GB grosse CUDA-Paket - dort vorher die CPU-Version
+# installieren (Befehl im README). Das Netz hat rund 24 000 Parameter und
+# trainiert auf einem normalen Rechner in unter zwei Minuten; eine GPU bringt
 # bei dieser Groesse nichts.
 
 numpy>=1.26

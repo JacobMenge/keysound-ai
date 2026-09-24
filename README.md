@@ -41,8 +41,8 @@ Netz, und am Ende steht eine Zahl, die du selbst gemessen hast.
 ## Was dabei herauskam
 
 Meine Referenzmessung, damit du weißt, worauf du dich einlässt. Acht Klassen
-(`J A C O B D E .`), ein Kondensatormikrofon rund 30 cm neben der Tastatur,
-fünf Aufnahmesitzungen an einem Tag.
+(`J A C O B D E .`), ein Kondensatormikrofon, fünf Aufnahmesitzungen an einem
+Tag.
 
 <p align="center">
   <img src="docs/bilder/acht_tasten.png" width="31%" alt="Die acht Tasten">
@@ -59,7 +59,7 @@ fünf Aufnahmesitzungen an einem Tag.
 | Zufall | 12,5 % |
 | **Beste Validierung** | **99,2 %** |
 | **Test, ungesehene Sitzung** | **88,3 %** |
-| Live getippt, flüssig | nahe Zufall |
+| Live getippt | langsam: `jacob.decoded` zweimal fehlerfrei · flüssig: deutlich schlechter (beobachtet, nicht protokolliert) |
 
 <p align="center">
   <img src="docs/bilder/trainingsverlauf.png" width="31%" alt="Trainingsverlauf">
@@ -73,21 +73,26 @@ Die drei Zahlen zusammen sind die eigentliche Geschichte:
 derselben Haltung, im selben Raumklang. Das Modell erkennt da zu einem guten
 Teil den Nachmittag wieder, nicht nur die Taste.
 
-**88,3 % sind die ehrliche Zahl.** Die Testsitzung lag rund 37 Minuten nach dem
-Training und war beim Trainieren nie sichtbar. Der Abstand zu 99,2 % – etwa elf
+**88,3 % sind die ehrliche Zahl.** Die Testsitzung begann rund eine halbe
+Stunde nach dem Training (gut 40 Minuten nach der letzten Trainingsaufnahme)
+und war beim Trainieren nie sichtbar. Der Abstand zu 99,2 % – etwa elf
 Prozentpunkte – ist der Preis dafür, dass sich in einer guten halben Stunde
 Handhaltung, Sitzposition und Raum leicht verschieben. Wer an einem anderen Tag
-testet, wird noch etwas mehr verlieren.
+testet, verliert vermutlich noch mehr – gemessen habe ich das noch nicht.
 
-**Flüssiges Tippen scheitert.** Wenn ich ein Wort normal schnell tippe, fällt
-die Trefferquote auf Zufallsniveau. Das Modell hat nie gelernt, wie Tippen
-klingt: In den Trainingsdaten lag rund eine Sekunde zwischen zwei Anschlägen,
-jeder einzeln und sauber freistehend. Beim echten Tippen überlappen Anschlag,
-Loslassen und der nächste Anschlag.
+**Flüssiges Tippen scheitert.** Langsam getippt, mit einer Pause zwischen den
+Tasten, kam in der Live-Demo `jacob.decoded` zweimal fehlerfrei heraus. Beim
+Dreh habe ich das Wort auch normal schnell getippt – da ging die Erkennung
+deutlich in den Keller. Eine Quote dafür habe ich nicht protokolliert, deshalb
+steht hier keine Zahl. Der Grund ist klar: Das Modell hat nie gelernt, wie
+Tippen klingt. In den Trainingsdaten lagen rund zwei Sekunden zwischen zwei
+Anschlägen, jeder einzeln und sauber freistehend. Beim echten Tippen
+überlappen Anschlag, Loslassen und der nächste Anschlag.
 
 Einzelne Klassen im Test: `A` und `D` 100 %, `C`, `O` und `E` je 93 %, `.` 87 %,
 `J` 80 %, `B` 60 %. Das `B` liegt auf meiner Tastatur in der untersten Reihe
-nahe der Gehäusekante und klingt dumpfer – es wandert regelmäßig zum `E`.
+nahe der Gehäusekante und klingt dumpfer – es landet je dreimal beim `C` und
+beim `D`. Das `J` geht dreimal an das `D`.
 
 Kurz: Der Effekt ist real und deutlich messbar. Ein Passwortknacker ist er nicht.
 
@@ -104,20 +109,25 @@ Werkzeug, um Passwörter zu rekonstruieren oder mitzulesen, was jemand schreibt.
 
 Das sind nicht nur gute Vorsätze, das steckt in der Bauweise:
 
-* **Aufgenommen wird nur im ausdrücklich gestarteten Aufnahmemodus.** Läuft er
-  nicht, hört das Programm nichts mit.
+* **Das Mikrofon ist nur offen, solange du ein Werkzeug ausdrücklich gestartet
+  hast** – Aufnahmemodus, Pegelanzeige, Mithören-Test oder Live-Demo. Ohne
+  gestartetes Werkzeug hört das Programm nichts mit.
 * **Tastendrücke kommen aus dem Fensterereignis des Collectors**, nicht aus
   einem globalen Hook. Ist sein Fenster nicht im Vordergrund, pausiert die
   Aufnahme von selbst.
 * **Gespeichert wird nur das kurze Fenster um einen angekündigten Anschlag.**
-  Das Programm sagt dir die Taste an; drückst du eine andere, wird nichts
-  gespeichert, nichts gezählt, nichts protokolliert.
+  Das Programm sagt dir die Taste an. Drückst du eine andere deiner Klassen,
+  wird nichts gespeichert – nur ein Fehlerzähler geht hoch, und die
+  Statuszeile meldet es kurz. Tasten außerhalb deiner Klassen werden weder
+  gezählt noch angezeigt noch gespeichert. Einzige Ausnahme vom Speichern:
+  `08_demo.py --mitschnitt` (standardmäßig aus, vom Studio nie gesetzt) legt
+  zur Fehlersuche jedes erkannte Segment unter `daten/demo_mitschnitt/` ab.
 * **Das Modell kann nichts anderes ausgeben als deine Klassen.** Die letzte
   Schicht hat genau so viele Ausgänge, wie du Zeichen festgelegt hast. Das ist
   keine Einstellung, das ist die Form des Netzes.
 * **Die Live-Demo liest überhaupt keine Tastatur-Ereignisse.** Sie findet
-  Anschläge allein im Audiosignal. Es gibt in diesem Programm keine Stelle, an
-  der die tatsächlich gedrückte Taste bekannt wäre.
+  Anschläge allein im Audiosignal und wird nur mit der Maus bedient. Es gibt in
+  ihr keine Stelle, an der die tatsächlich gedrückte Taste bekannt wäre.
 * **Freies Text-Decoding ist nicht implementiert.** Das Modell kennt einzelne
   Anschläge, keine Wörter und keine Sprache.
 
@@ -129,68 +139,83 @@ vielerorts auch nicht legal.
 
 ## Installation
 
-Gebraucht wird Python 3.10 oder neuer und ein Mikrofon.
+Gebraucht wird Python 3.10 oder neuer und ein Mikrofon. Getestet ist das
+Projekt mit Python 3.12 unter Windows 11. Die Abhängigkeiten laden knapp 1 GB
+herunter (vor allem torch), die Installation dauert ein paar Minuten.
 
 ```bash
 git clone https://github.com/JacobMenge/keysound-ai.git
 cd keysound-ai
-python -m venv .venv
 ```
 
-Umgebung aktivieren – Windows:
+**Windows** – in PowerShell oder der Eingabeaufforderung, ohne die Umgebung zu
+aktivieren (das scheitert in PowerShell oft an der Ausführungsrichtlinie):
+
+```powershell
+py -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python werkzeuge\09_selbsttest.py
+```
+
+Gibt es `py` nicht, geht auch `python -m venv .venv`. Danach startest du das
+Programm per Doppelklick auf `start.bat` – das nimmt automatisch die `.venv`.
+Klone am besten in einen kurzen Pfad wie `C:\keysound-ai`, siehe
+[Wenn etwas nicht klappt](#wenn-etwas-nicht-klappt).
+
+**Linux** – erst die Systempakete für Mikrofon und Fenster, dann torch als
+CPU-Version (sonst holt pip das mehrere GB große CUDA-Paket), dann den Rest:
 
 ```bash
-.venv\Scripts\activate
+sudo apt install libportaudio2 python3-tk     # Fedora: sudo dnf install portaudio python3-tkinter
+python3 -m venv .venv
+.venv/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python werkzeuge/09_selbsttest.py
 ```
 
-macOS und Linux:
+**macOS** – wie Linux, nur ohne `apt` und ohne den torch-Sonderweg. Mit
+Homebrew-Python fehlt manchmal Tk: `brew install python-tk`. Linux und macOS
+sind nicht auf echter Hardware getestet.
 
-```bash
-source .venv/bin/activate
-```
-
-Dann die Abhängigkeiten:
-
-```bash
-pip install -r requirements.txt
-```
-
-Ob alles sitzt, sagt dir der Selbsttest. Er braucht kein Mikrofon, erzeugt
-künstliche Anschläge, trainiert damit kurz und rendert jede Grafik:
-
-```bash
-python werkzeuge/09_selbsttest.py
-```
-
-Läuft der durch, läuft auch der Rest.
+Der Selbsttest braucht kein Mikrofon. Er prüft, ob Tk und PortAudio laden,
+erzeugt künstliche Anschläge, trainiert damit kurz, wertet eine Testsitzung
+aus und rendert jede Grafik. Läuft er durch, stimmen Installation und Rechnung
+– ob dein Mikrofon ankommt, zeigt dir Schritt 1 im Studio.
 
 ---
 
 ## So arbeitest du damit
 
+Windows: Doppelklick auf `start.bat` (nimmt die `.venv` im Projektordner und
+lässt das Fenster bei einem Fehler offen). Linux und macOS:
+
 ```bash
-python start.py
+.venv/bin/python start.py
 ```
 
-Unter Windows tut es auch ein Doppelklick auf `start.bat` – das nimmt die
-`.venv` im Projektordner, falls es eine gibt, und lässt das Fenster bei einem
-Fehler offen stehen.
-
-Ein Fenster, sechs Schritte. Jeder sagt dir, was er braucht, und schaltet den
-nächsten frei; erledigte Schritte bekommen links einen grünen Haken.
+Ein Fenster, sechs Schritte. Jeder sagt dir, was er braucht; erledigte
+Schritte bekommen links einen grünen Haken. Passt das Fenster nicht ganz auf
+deinen Bildschirm, lässt sich der Inhalt scrollen.
 
 > Startet gar nichts, sondern kommt eine Meldung über fehlende Pakete: Dann
 > läuft ein anderes Python als das, in dem du installiert hast. Die Meldung
-> nennt beides – den Interpreter und die vier Zeilen, mit denen du eine eigene
-> Umgebung anlegst.
+> nennt den Interpreter und die Befehle, mit denen du eine eigene Umgebung
+> anlegst.
 
 ### 1 · Mikrofon
 
 Wähle deinen Eingang. Der Knopf *2 Sekunden mithören* misst Spitzenpegel und
 Rauschboden, während du ein paar Mal tippst. Über 25 dB Abstand ist gut, unter
 15 dB wird es schwierig. Näher ran hilft am meisten. Unter Windows taucht
-dasselbe Gerät mehrfach auf (WASAPI, WDM-KS, …) – im Zweifel **WDM-KS**
-nehmen, siehe [Wenn etwas nicht klappt](#wenn-etwas-nicht-klappt).
+dasselbe Gerät mehrfach auf (WASAPI, WDM-KS, …) – vorgeschlagen wird **WDM-KS**,
+siehe [Wenn etwas nicht klappt](#wenn-etwas-nicht-klappt). Hast du ein Gerät
+erst nach dem Start eingesteckt, holt *Liste neu einlesen* es dazu.
+*Pegel im Vollbild* öffnet die Pegelanzeige für das markierte Gerät.
+
+Gemerkt wird das Mikrofon über Name und Treiberart, nicht über seine
+Listennummer. Steckst du USB-Geräte um, verschiebt sich die Nummer – das
+Programm findet dein Mikrofon trotzdem wieder oder sagt klar, dass es fehlt,
+statt still über ein anderes aufzunehmen.
 
 <p align="center"><img src="docs/bilder/studio_1_mikrofon.png" width="760" alt="Schritt 1: Mikrofon wählen"></p>
 
@@ -206,7 +231,8 @@ stellst du ein, wie viele Proben du je Klasse aufnehmen willst.
 ### 3 · Aufnehmen
 
 Der Collector geht im Hochformat auf, sagt dir eine Taste an, du drückst sie.
-Das dauert. Nimm mindestens drei Sitzungen auf und gib ihnen danach Rollen:
+Das dauert. Proben je Klasse sind 5 bis 200. Nimm mindestens drei Sitzungen
+auf und gib ihnen danach Rollen (die neueste Sitzung steht oben):
 `train` zum Lernen, `val` zum Mitprüfen, `test` für die ehrliche Zahl. **Die
 Testsitzung nimmst du am besten an einem anderen Tag auf** – nur dann misst sie
 wirklich die Taste und nicht den Raum von heute Nachmittag.
@@ -215,25 +241,30 @@ wirklich die Taste und nicht den Raum von heute Nachmittag.
 
 ### 4 · Daten prüfen
 
-Sind die Aufnahmen brauchbar? *Prüfen* checkt Pegel, Abstand zum Rauschen,
-Übersteuerung und ob eine Rauschunterdrückung dazwischengefunkt hat.
+Sind die Aufnahmen brauchbar? *Prüfen* checkt die ausgewählte Sitzung auf
+Pegel, Abstand zum Rauschen, Übersteuerung und ob eine Rauschunterdrückung
+dazwischengefunkt hat.
 *Trennbarkeit messen* verrät dir schon vor dem Training, ob überhaupt Struktur
 in den Daten steckt – ganz ohne neuronales Netz, mit einem einfachen
-Nächster-Schwerpunkt-Test.
+Nächster-Schwerpunkt-Test (angelernt an `train`, geprüft an `val`; die
+Testsitzung bleibt unberührt).
 
 <p align="center"><img src="docs/bilder/studio_4_pruefen.png" width="760" alt="Schritt 4: Trennbarkeit messen"></p>
 
 ### 5 · Training
 
 Epochenzahl wählen, starten, zusehen. Fehler und Trefferquote wachsen live
-mit, die gestrichelte Linie ist das Zufallsniveau. Am Ende stehen die beste
-Validierung, die schwächsten Klassen und der Pfad zum Modell. Auf Wunsch
-fallen alle Grafiken im Hochformat (1080 × 1920) heraus.
+mit, die gestrichelte Linie ist das Zufallsniveau. *Abbrechen* stoppt nach der
+laufenden Epoche, ohne ein halbes Modell zu speichern. Am Ende stehen die beste
+Validierung, die schwächsten Klassen und der Pfad zum Modell. Während ein
+Training läuft, lassen sich die Klassen nicht umstellen.
 
 *Auf Testsitzung prüfen* holt dann die ehrliche Zahl: Das fertige Modell wird
 gegen deine `test`-Sitzung gerechnet, die weder beim Lernen noch bei der Wahl
 des besten Stands mitgespielt hat. Das Ergebnis landet zusätzlich in
-`daten/modelle/test_ergebnis.json`.
+`daten/modelle/test_ergebnis.json`. *Grafiken im Hochformat speichern* legt
+Trainingsverlauf und Verwechslungsmatrix als 1080 × 1920 ab – nach einer
+Testauswertung auch die Matrix der Testsitzung.
 
 <p align="center"><img src="docs/bilder/studio_5_training_fertig.png" width="760" alt="Schritt 5: Training mit Live-Kurve"></p>
 
@@ -276,14 +307,17 @@ ab dem Tastendruck.
 **3 · Qualität prüfen.** Zu leise, übersteuert, oder mehr als ein Anschlag im
 Fenster – dann fliegt die Probe raus, bevor sie gespeichert wird.
 
-**4 · Log-Mel-Spektrogramm.** 250 ms ab 15 ms vor dem Onset werden in 64
-Mel-Bänder zwischen 100 Hz und 16 kHz umgerechnet. Aus dem Geräusch wird ein
+**4 · Log-Mel-Spektrogramm.** 250 ms ab 15 ms vor dem Onset (einstellbar in
+`config.json`) werden in 64 Mel-Bänder zwischen 100 Hz und 16 kHz umgerechnet.
+Das Modell speichert Schnitt, Abtastrate und Mel-Einstellungen mit, damit Test
+und Live-Demo später genau so rechnen wie das Training. Aus dem Geräusch wird ein
 Bild. Jede Probe wird auf eigenen Mittelwert und eigene Streuung normiert –
 damit fällt die Lautstärke heraus und mit ihr die Frage, wie fest jemand
 gerade gedrückt hat. Übrig bleibt die Klangfarbe.
 
 **5 · Ein kleines CNN.** Drei Faltungsblöcke (16/32/64 Kanäle) mit
-Batch-Normalisierung und Max-Pooling, danach ein Mittelwert über die Zeit,
+Batch-Normalisierung und Max-Pooling, danach ein Mittelwert über die ganze
+Merkmalskarte (Zeit und Frequenz),
 Dropout und eine lineare Schicht auf so viele Ausgänge, wie du Klassen hast.
 Rund 24 000 Parameter bei acht Klassen. Bewusst klein: Ein paar hundert
 Trainingsproben sind wenig, ein großes Netz würde sie schlicht auswendig
@@ -313,11 +347,11 @@ genauer steuern will, findet dieselben Schritte als einzelne Programme:
 | `werkzeuge/04_sitzungen.py` | Sitzungen auflisten, Rollen vergeben |
 | `werkzeuge/05_daten_pruefen.py` | Qualitätsprüfung einer Sitzung |
 | `werkzeuge/06_trennbarkeit.py` | Nächster-Schwerpunkt-Test – Struktur in den Daten, ganz ohne Lernen |
-| `werkzeuge/07_training.py` | Training auf der Kommandozeile, mit `--test` die Auswertung auf der Testsitzung |
-| `werkzeuge/08_demo.py` | Live-Demo, rein aus dem Audiosignal |
+| `werkzeuge/07_training.py` | Training auf der Kommandozeile, mit `--test` die Auswertung auf der Testsitzung samt Grafik |
+| `werkzeuge/08_demo.py` | Live-Demo, rein aus dem Audiosignal – `--abstand`, `--schwelle`, `--geraet`, `--soll`, `--buehne`, `--mitschnitt` |
 | `werkzeuge/09_selbsttest.py` | Installation und Pipeline prüfen, ohne Mikrofon |
 | `werkzeuge/90_layoutvorschau.py` | Alle Grafiken mit Beispieldaten rendern |
-| `werkzeuge/91_animationen.py` | Szenen als MP4 oder Bildfolge (braucht ffmpeg) |
+| `werkzeuge/91_animationen.py` | Szenen als MP4 (mit ffmpeg) oder PNG-Bildfolge (ohne) |
 
 Jedes Werkzeug erklärt sich selbst mit `--help`.
 
@@ -334,8 +368,9 @@ Ein paar Dinge, die dabei helfen:
 
 * **Fang klein an.** Vier Tasten sind in zwanzig Minuten aufgenommen und
   beantworten die Frage schon. Das Alphabet ist ein Abend.
-* **Nimm Tasten, die weit auseinanderliegen.** `Q`, `T`, `M` und `Ö` sind
-  leichter zu trennen als `A`, `S`, `D` und `F`.
+* **Nimm Tasten, die weit auseinanderliegen.** `Q`, `T`, `M` und `Ö` lassen
+  sich vermutlich leichter trennen als `A`, `S`, `D` und `F` – gemessen habe
+  ich das nicht.
 * **Rechne mit dem Zufallsniveau.** Bei 26 Klassen trifft blindes Raten 3,8 %.
   Was nach wenig aussieht, kann trotzdem ein Vielfaches davon sein – das
   Programm rechnet dir den Faktor überall mit aus.
@@ -374,18 +409,42 @@ Mikrofon stummgeschaltet? Hängt das Interface am richtigen USB-Anschluss? Bei
 mir war der RØDECaster an USB 2 statt USB 1 gesteckt und lieferte deshalb
 Stille.
 
+**Das Mikrofon wird nicht gefunden.** Gemerkt wird es über Name und
+Treiberart. Ist es abgezogen oder heißt nach einem Treiber-Update anders, sagt
+das Programm das deutlich – dann in Schritt 1 *Liste neu einlesen* und das Gerät
+neu übernehmen.
+
 **Doppelte Buchstaben in der Live-Demo.** Ein Tastendruck macht zwei Geräusche:
 das Anschlagen und das Loslassen, je nach Haltedauer 80 bis 250 ms auseinander.
 Die Demo hält deshalb 300 ms Sperrzeit zwischen zwei Anschlägen ein. Wird bei
-dir trotzdem doppelt gezählt, dreh `--abstand` hoch.
+dir trotzdem doppelt gezählt, starte die Demo von der Kommandozeile mit höherer
+Sperrzeit (im Studio nicht einstellbar):
+
+```bash
+python werkzeuge/08_demo.py --abstand 400
+```
 
 **Die Live-Demo erkennt fast nichts, das Training sah gut aus.** Tipp
 langsamer, mit deutlicher Pause. Das Modell hat nur einzeln stehende Anschläge
 gesehen. Wenn du flüssiges Tippen erkennen willst, musst du flüssiges Tippen
-aufnehmen – das ist ein anderes, deutlich schwierigeres Experiment.
+aufnehmen – das ist ein anderes, deutlich schwierigeres Experiment. Sehr leise
+Anschläge überhört die Demo absichtlich; waren schon deine Aufnahmen leise,
+senkt sie die Schwelle selbst etwas. Von Hand geht das mit `--schwelle -40`.
+Nimmt dein Mikrofon eine andere Abtastrate als beim Training, fordert die Demo
+die Rate des Modells an und rechnet sonst um – mit einem Hinweis.
 
 **Die Testsitzung ist viel schlechter als die Validierung.** Das ist kein
 Fehler, das ist das Ergebnis. Genau dieser Abstand ist die interessante Zahl.
+
+**pip bricht mit einer Meldung zu „Long Path“ ab.** Unter Windows sind Pfade
+ohne Zusatzeinstellung auf 260 Zeichen begrenzt, und torch bringt sehr lange
+Dateinamen mit. Lösch die halb installierte `.venv`, klon das Projekt in einen
+kurzen Ordner wie `C:\keysound-ai` und installier dort neu.
+
+**Eine Sitzung liegt doppelt vor.** Hast du einen Sitzungsordner im Explorer
+kopiert, tragen beide dieselbe Kennung. Damit nicht dieselbe Aufnahme in
+Training und Test landet, verweigern Rollenvergabe und Training dann die
+Arbeit – lösch die Kopie aus `daten/roh/`.
 
 ---
 
@@ -393,6 +452,9 @@ Fehler, das ist das Ergebnis. Genau dieser Abstand ist die interessante Zahl.
 
 ```
 start.py                  Das Programm. Hier geht es los.
+start.bat                 Doppelklick-Start unter Windows
+requirements.txt          Abhängigkeiten
+LICENSE                   MIT-Lizenz
 tastenakustik/            Die Bibliothek
   config.py               Klassen, Parameter, Verzeichnisse
   audio.py                Geräte und Ringpuffer
@@ -412,10 +474,13 @@ tastenakustik/            Die Bibliothek
 werkzeuge/                Die Einzelschritte als Kommandozeilenprogramme
 docs/bilder/              Bilder für dieses README
 daten/                    Deine Aufnahmen und Modelle (nicht im Repository)
+  roh/                    eine Sitzung je Ordner: session.json, proben.jsonl, WAVs
+  modelle/                trainierte Modelle, Verlauf, Testergebnis
 ausgabe/                  Gerenderte Grafiken (nicht im Repository)
+config.json               Deine Einstellungen (nicht im Repository)
 ```
 
-`daten/` und `ausgabe/` stehen in der `.gitignore`. Deine Aufnahmen bleiben bei
+`daten/`, `ausgabe/` und `config.json` stehen in der `.gitignore`. Deine Aufnahmen bleiben bei
 dir – auch wenn du das Repository forkst und weiterentwickelst.
 
 ---
