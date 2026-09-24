@@ -130,12 +130,21 @@ def balken(ax, farben: list[str], werte: list[float] | None = None,
     n = len(farben)
     if werte is None:
         # Ein Gewinner, der Rest klein und ungleich - so sieht eine echte
-        # Softmax-Ausgabe aus. Laenge folgt der Klassenzahl.
+        # Softmax-Ausgabe aus. Laenge folgt der Klassenzahl. Das Muster
+        # wiederholt sich ab zwoelf Klassen, der Gewinner darf es nicht:
+        # deshalb erst ohne ihn aufbauen und ihn dann genau einmal setzen.
         muster = (0.15, 0.1, 0.92, 0.12, 0.2, 0.1, 0.3, 0.08, 0.18, 0.11, 0.25)
         werte = [muster[i % len(muster)] for i in range(n)]
-    breite = 0.86 / n
+        werte = [0.14 if w >= 0.9 else w for w in werte]
+        if werte:
+            werte[min(2, n - 1)] = 0.92
+    breite = 0.86 / max(n, 1)
+    # Die Balken wachsen nacheinander. Der Versatz je Balken schrumpft bei
+    # vielen Klassen, damit bei anteil 1 alle voll stehen - bis zehn Klassen
+    # bleibt das Timing wie bisher.
+    stufe = min(0.1, 1.0 / max(n, 1))
     for i, (farbe, wert) in enumerate(zip(farben, werte)):
-        hoch = 0.70 * wert * _a(anteil * 2 - i * 0.1)
+        hoch = 0.70 * wert * _a(anteil * 2 - i * stufe)
         if hoch <= 0.001:
             continue
         ax.add_patch(FancyBboxPatch(

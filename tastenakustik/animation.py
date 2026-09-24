@@ -80,8 +80,17 @@ def _ffmpeg() -> str | None:
 
 
 def rendere_bildfolge(szene: Szene, ordner: Path, fps: int = FPS) -> int:
-    """Alle Einzelbilder als PNG schreiben. Gibt die Anzahl zurueck."""
+    """Alle Einzelbilder als PNG schreiben. Gibt die Anzahl zurueck.
+
+    Nummerndateien eines frueheren Laufs werden vorher geloescht: Hatte der
+    mehr Bilder, blieben die hoeheren Nummern sonst liegen, und Schnitt-
+    programm wie ffmpeg haengten sie an. Andere Dateien im Ordner bleiben.
+    """
     ordner.mkdir(parents=True, exist_ok=True)
+    # Nur fuenf Ziffern wie "00042.png" - "?????" traefe auch eigene Dateien
+    # wie "cover.png" oder "titel.png".
+    for alt in ordner.glob("[0-9][0-9][0-9][0-9][0-9].png"):
+        alt.unlink()
     n = szene.frames(fps)
     for i in range(n):
         fig = szene.bild(szene.zeitpunkt(i, n))
@@ -94,7 +103,12 @@ def rendere_bildfolge(szene: Szene, ordner: Path, fps: int = FPS) -> int:
 
 def rendere_mp4(szene: Szene, pfad: Path, fps: int = FPS,
                 bildfolge_behalten: Path | None = None) -> Path:
-    """MP4 in 1080 x 1920 schreiben. Braucht ffmpeg im PATH."""
+    """MP4 in 1080 x 1920 schreiben. Braucht ffmpeg im PATH.
+
+    Scheitert ffmpeg - etwa ein Build ohne libx264 -, kommt ein RuntimeError
+    mit dem Grund zurueck, wie wenn ffmpeg ganz fehlt. Der Aufrufer faellt
+    dann auf die Bildfolge zurueck. Eine halb geschriebene MP4 wird entfernt.
+    """
     exe = _ffmpeg()
     if exe is None:
         raise RuntimeError("ffmpeg nicht gefunden - bitte in den PATH legen.")
@@ -106,15 +120,24 @@ def rendere_mp4(szene: Szene, pfad: Path, fps: int = FPS,
         tmp = tempfile.TemporaryDirectory()
         ziel = Path(tmp.name)
     try:
-        rendere_bildfolge(szene, ziel, fps)
+        n = rendere_bildfolge(szene, ziel, fps)
+        # -frames:v begrenzt auf genau die gerenderten Bilder, auch wenn im
+        # Ordner noch fremde Nummerndateien liegen sollten.
         befehl = [
             exe, "-y", "-loglevel", "error",
             "-framerate", str(fps), "-i", str(ziel / "%05d.png"),
+            "-frames:v", str(n),
             "-c:v", "libx264", "-preset", "slow", "-crf", "16",
             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             str(pfad),
         ]
-        subprocess.run(befehl, check=True)
+        try:
+            subprocess.run(befehl, check=True, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        except subprocess.CalledProcessError as fehler:
+            pfad.unlink(missing_ok=True)
+            grund = (fehler.stderr or "").strip()[-300:] or f"Exit-Code {fehler.returncode}"
+            raise RuntimeError(f"ffmpeg fehlgeschlagen: {grund}") from fehler
     finally:
         if tmp is not None:
             tmp.cleanup()
@@ -122,50 +145,87 @@ def rendere_mp4(szene: Szene, pfad: Path, fps: int = FPS,
 
 
 def zeige(szene: Szene, fps: int = FPS, schleife: bool = True) -> None:
-    """Live-Fenster zum Mitschneiden - laeuft in Echtzeit."""
-    import matplotlib
-    matplotlib.use("TkAgg")
-    import matplotlib.pyplot as plt
+    """Live-Fenster zum Mitschneiden - erst rendern, dann in Echtzeit.
+
+    Matplotlib schafft ein Bild in 1080 x 1920 nicht in 33 ms, weder beim
+    Neuzeichnen der Szene noch als imshow eines fertigen Pixelbilds. Deshalb
+    wird jedes Bild vorab einmal gerendert (das Fenster zeigt so lange den
+    Fortschritt) und in Fenstergroesse als PNG im Speicher abgelegt - roh
+    waeren es 8 MB je Bild, bei einer langen Szene Gigabytes. Beim Abspielen
+    wird nur noch ein fertiges Tk-Bild getauscht. Die Bildnummer folgt der Uhr:
+    Kommt ein Bild zu spaet, wird es uebersprungen, damit die Szene ihre echte
+    Dauer behaelt.
+
+    Die Fenstergroesse kommt wie bei den Live-Fenstern aus LiveMasse: echte
+    1080 x 1920 Pixel, wenn sie auf einen Monitor passen, sonst verkleinert.
+    """
+    import io
+    import time
+    import tkinter as tk
+
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from PIL import Image, ImageTk
+
+    from . import bedienung
 
     portrait.dpi_bewusst()
+    masse = bedienung.LiveMasse()
+    breite = round(portrait.BREITE * masse.skala)
+    hoehe = round(portrait.HOEHE * masse.skala)
     n = szene.frames(fps)
-    fig = plt.figure(figsize=(portrait.BREITE / portrait.DPI,
-                              portrait.HOEHE / portrait.DPI),
-                     dpi=portrait.DPI, facecolor=theme.BG)
-    fig.canvas.manager.set_window_title(f"{szene.name} - Tastenakustik")
-    try:
-        breite, hoehe, px, py, _ = portrait.fensterplatz(rand=90)
-        fig.canvas.manager.window.wm_geometry(f"+{px}+{py}")
-    except Exception:  # noqa: BLE001
-        pass
 
-    # Jedes Bild wird einmal gerendert und dann als fertiges Pixelbild
-    # angezeigt. Beim ersten Durchlauf baut sich der Zwischenspeicher auf,
-    # danach laeuft die Schleife in Echtzeit - gut zum Mitschneiden.
-    from matplotlib.animation import FuncAnimation
+    fenster = tk.Tk()
+    fenster.title(f"{szene.name} - Tastenakustik")
+    fenster.configure(background=theme.BG)
+    fenster.resizable(False, False)
+    # Ein leeres Bild in voller Groesse legt die Fenstergroesse fest, bevor
+    # das erste gerenderte Bild da ist. Der Fortschritt steht darueber.
+    leer = tk.PhotoImage(width=breite, height=hoehe)
+    flaeche = tk.Label(fenster, image=leer, compound="center", bg=theme.BG,
+                       fg=theme.TEXT_SCHWACH, font=("Segoe UI", 18),
+                       bd=0, highlightthickness=0, padx=0, pady=0)
+    flaeche.image = leer
+    flaeche.pack()
+    masse.platzieren(fenster)
 
-    zustand = {"i": 0}
-    bild_cache: dict[int, np.ndarray] = {}
+    bilder: list[bytes] = []
+    zustand = {"zuletzt": -1}
 
-    def schritt_bild(_frame):  # noqa: ANN001
-        i = zustand["i"]
-        zustand["i"] = (i + 1) % n if schleife else min(i + 1, n - 1)
-        if i not in bild_cache:
-            t = szene.zeitpunkt(i, n)
-            vorlage = szene.bild(t)
-            vorlage.canvas.draw()
-            bild_cache[i] = np.asarray(vorlage.canvas.buffer_rgba()).copy()
-            vorlage.clear()
-        fig.clear()
-        ax = fig.add_axes([0, 0, 1, 1])
-        ax.imshow(bild_cache[i])
-        ax.axis("off")
-        return ()
+    def rendere(i: int = 0) -> None:
+        if i >= n:
+            abspielen(time.perf_counter())
+            return
+        flaeche.configure(text=f"rendere Bild {i + 1}/{n}")
+        vorlage = szene.bild(szene.zeitpunkt(i, n))
+        leinwand = FigureCanvasAgg(vorlage)
+        leinwand.draw()
+        bild = Image.fromarray(np.asarray(leinwand.buffer_rgba())[..., :3])
+        if bild.size != (breite, hoehe):
+            bild = bild.resize((breite, hoehe), Image.LANCZOS)
+        puffer = io.BytesIO()
+        bild.save(puffer, format="PNG", compress_level=3)
+        bilder.append(puffer.getvalue())
+        # Die Vorlage sofort freigeben - sonst haelt jede Szene ihre Figuren.
+        vorlage.clear()
+        del vorlage, leinwand
+        fenster.after(1, rendere, i + 1)
 
-    ani = FuncAnimation(fig, schritt_bild, interval=1000 / fps,
-                        blit=False, cache_frame_data=False)
-    fig._ani = ani  # Referenz halten
-    plt.show()
+    def abspielen(start: float) -> None:
+        schritt = int((time.perf_counter() - start) * fps)
+        i = schritt % n if schleife else min(schritt, n - 1)
+        if i != zustand["zuletzt"]:
+            bild = ImageTk.PhotoImage(Image.open(io.BytesIO(bilder[i])))
+            flaeche.configure(image=bild, text="")
+            flaeche.image = bild   # Referenz halten, sonst raeumt Tk es weg
+            zustand["zuletzt"] = i
+        if not schleife and schritt >= n - 1:
+            return
+        naechstes = start + (schritt + 1) / fps
+        warten = max(int((naechstes - time.perf_counter()) * 1000), 1)
+        fenster.after(warten, abspielen, start)
+
+    fenster.after(1, rendere)
+    fenster.mainloop()
 
 
 def ablegen(szene: Szene, unterordner: str = "_animation", fps: int = FPS,

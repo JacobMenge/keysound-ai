@@ -1,8 +1,9 @@
 """Layout-Vorschau aller Video-Grafiken im Hochformat - mit Beispieldaten.
 
 Damit laesst sich die Darstellung festzurren, bevor echte Messungen vorliegen.
-Jedes Bild traegt den Hinweis "LAYOUT-VORSCHAU - BEISPIELDATEN". Sobald Daten
-da sind, zeichnen dieselben Funktionen aus tastenakustik/plots.py die echten
+Jede Grafik mit Beispieldaten traegt den Hinweis "BEISPIELDATEN" (Klassentafel
+und Pipeline zeigen keine Messung und bleiben ohne). Sobald Daten da sind,
+zeichnen dieselben Funktionen aus tastenakustik/plots.py die echten
 Ergebnisse - dann ohne Stempel.
 
 Aufruf:
@@ -24,7 +25,7 @@ matplotlib.use("Agg")
 import numpy as np
 
 from tastenakustik import beispiel, features, onset, plots, portrait
-from tastenakustik.config import Config, TASTEN, AUSGABE
+from tastenakustik.config import TASTEN, AUSGABE, laden_oder_beenden
 
 ORDNER = "_layout"
 rng = np.random.default_rng(20260922)
@@ -43,7 +44,7 @@ def main() -> int:
                    help="Sicherheitszonen von Shorts / Reels / TikTok einblenden")
     args = p.parse_args()
 
-    cfg = Config.laden()
+    cfg = laden_oder_beenden()
     print(f"Hochformat {portrait.BREITE} x {portrait.HOEHE} nach "
           f"{AUSGABE / ORDNER}\n")
 
@@ -125,7 +126,8 @@ def main() -> int:
     plots.vorschau_stempel(fig)
     sichern(fig, "10_blindtest_sequenz", args.zonen)
 
-    print("\nAlle Bilder sind 1080 x 1920 und tragen den Vorschau-Hinweis.")
+    print("\nAlle Bilder sind 1080 x 1920; Grafiken mit Beispieldaten tragen den "
+          "Hinweis BEISPIELDATEN (04b und 05 zeigen keine Messung und bleiben ohne).")
     print("Sobald Daten vorliegen, zeichnen dieselben Funktionen die echten "
           "Ergebnisse - ohne Stempel.")
     return 0

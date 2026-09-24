@@ -65,12 +65,19 @@ def _pfeil(fig: Figure, oben: float, hoehe: float) -> None:
     ))
 
 
-def vorschau_stempel(fig: Figure) -> None:
-    """Markieren, dass hier keine Messung zu sehen ist."""
-    fig.text(P.x(P.BREITE / 2), P.y(P.HOEHE / 2), "BEISPIELDATEN",
+def vorschau_stempel(fig: Figure, text: str = "BEISPIELDATEN") -> None:
+    """Markieren, dass hier keine Messung zu sehen ist - oder nicht die, die
+    der Titel verspricht.
+
+    text darf einen Zeilenumbruch enthalten: Der grosse Schraegzug laeuft
+    sonst bei laengeren Hinweisen aus der Leinwand. Die kleine Marke unten
+    steht einzeilig.
+    """
+    fig.text(P.x(P.BREITE / 2), P.y(P.HOEHE / 2), text,
              ha="center", va="center", fontsize=60, fontweight="bold",
-             color=theme.WARN, alpha=0.16, rotation=28, zorder=40)
-    fig.text(P.x(P.INHALT_LINKS), P.y(1700), "BEISPIELDATEN", fontsize=22,
+             color=theme.WARN, alpha=0.16, rotation=28, zorder=40,
+             multialignment="center")
+    fig.text(P.x(P.INHALT_LINKS), P.y(1700), text.replace("\n", " – "), fontsize=22,
              fontweight="bold", color=theme.BG, va="center", ha="left", zorder=40,
              bbox=dict(boxstyle="round,pad=0.45", facecolor=theme.WARN,
                        edgecolor="none"))
@@ -92,8 +99,15 @@ def _mel_grenzen(cfg: Config) -> tuple[float, float]:
 
 
 # --- 1. Markierter Tastenschlag ------------------------------------------
-def wellenform_mit_onset(fenster: np.ndarray, label: str, anschlag, cfg: Config) -> Figure:
-    """Ein aufgenommenes Fenster mit Onset-Marke und markiertem Schnitt."""
+def wellenform_mit_onset(fenster: np.ndarray, label: str, anschlag, cfg: Config,
+                         y_grenze: float | None = None) -> Figure:
+    """Ein aufgenommenes Fenster mit Onset-Marke und markiertem Schnitt.
+
+    cfg muss die Aufnahmeparameter des Fensters tragen (Abtastrate, Pre- und
+    Post-Roll), sonst stimmen Zeitachse und Onset nicht. y_grenze haelt die
+    Skala fest - in der Animation laeuft das Fenster erst ein, und eine aus dem
+    sichtbaren Teil berechnete Grenze wuerde dabei springen.
+    """
     from . import onset as onset_modul
 
     fig = P.figur()
@@ -105,9 +119,14 @@ def wellenform_mit_onset(fenster: np.ndarray, label: str, anschlag, cfg: Config)
     ax = P.achse(fig, oben=628, hoehe=560)
     ax.plot(t, fenster, color=farbe, lw=1.4)
     ax.set_xlim(t[0], t[-1])
-    grenze = float(np.max(np.abs(fenster))) * 1.25
+    grenze = (y_grenze if y_grenze is not None
+              else float(np.max(np.abs(fenster))) * 1.25)
     ax.set_ylim(-grenze, grenze)
-    P.achse_aufraeumen(ax, x_ticks=[-200, 0, 200, 400])
+    # Ticks im 200-ms-Raster, aber nur innerhalb des aufgenommenen Fensters -
+    # sonst dehnt ein Tick die Achse auf einen leeren Bereich.
+    ticks = list(range(-(int(cfg.pre_roll_ms) // 200) * 200,
+                       int(cfg.post_roll_ms) + 1, 200))
+    P.achse_aufraeumen(ax, x_ticks=ticks)
 
     if anschlag.gefunden:
         t_on = t[min(anschlag.onset_sample, t.size - 1)]
@@ -117,7 +136,7 @@ def wellenform_mit_onset(fenster: np.ndarray, label: str, anschlag, cfg: Config)
         ax.axvline(t_on, color=theme.AKZENT2, lw=3.2, zorder=5)
         fig.text(P.x(P.INHALT_LINKS), P.y(596), "Onset", fontsize=P.S_LABEL,
                  fontweight="bold", color=theme.AKZENT2, va="center")
-        fig.text(P.x(P.INHALT_RECHTS), P.y(596), f"{cfg.segment_ms} ms",
+        fig.text(P.x(P.INHALT_RECHTS), P.y(596), f"{float(cfg.segment_ms):.0f} ms",
                  fontsize=P.S_LABEL, fontweight="bold", color=theme.AKZENT2,
                  va="center", ha="right")
 
@@ -133,8 +152,10 @@ def wellenform_zu_mel(fenster: np.ndarray, label: str, cfg: Config) -> Figure:
     fig = P.figur()
     P.kopf(fig, "Vom Klang zum Bild")
     farbe = theme.farbe(label)
-    _kachel(fig, anzeige(label), 250, 104, farbe,
-            links=P.INHALT_RECHTS - 104, breite=104, fontsize=50)
+    # Die Kachel steht rechts auf Hoehe von "Wellenform", nicht neben dem
+    # Titel - der reicht bis fast an den rechten Rand.
+    _kachel(fig, anzeige(label), 396, 88, farbe,
+            links=P.INHALT_RECHTS - 88, breite=88, fontsize=44)
 
     t = (np.arange(fenster.size) / cfg.samplerate - cfg.pre_roll_ms / 1000) * 1000
 
@@ -157,7 +178,7 @@ def wellenform_zu_mel(fenster: np.ndarray, label: str, cfg: Config) -> Figure:
 
 
 # --- 2b. Die Klassen als Tafel -------------------------------------------
-def klassen_tafel(titel: str = "", spalten: int = 2,
+def klassen_tafel(titel: str = "", spalten: int | None = None,
                   anteil: float = 1.0) -> Figure:
     """Alle Klassen als grosse Kacheln - das Alphabet dieses Experiments.
 
@@ -166,7 +187,12 @@ def klassen_tafel(titel: str = "", spalten: int = 2,
     wiedererkannt wird.
 
     Zeichen, die sich nicht selbst erklaeren, bekommen ihren Namen dazu - ein
-    Punkt ist sonst nur ein Pixel neben lauter Buchstaben.
+    Punkt ist sonst nur ein Pixel neben lauter Buchstaben. Wird die Kachel
+    dafuer zu klein, bleibt es beim Zeichen allein.
+
+    Ohne Angabe richtet sich die Spaltenzahl nach der Klassenzahl wie in
+    klassen_vergleich - mit fest zwei Spalten wuerden aus 26 Klassen flache
+    Streifen.
 
     anteil blendet die Kacheln nacheinander ein (fuer animation.py).
     """
@@ -175,6 +201,8 @@ def klassen_tafel(titel: str = "", spalten: int = 2,
         P.kopf(fig, titel)
 
     n = len(TASTEN)
+    if spalten is None:
+        spalten = 2 if n <= 10 else (3 if n <= 18 else (4 if n <= 28 else 5))
     spalten = max(1, min(spalten, n))
     zeilen = -(-n // spalten)
 
@@ -195,6 +223,12 @@ def klassen_tafel(titel: str = "", spalten: int = 2,
 
     schrift = max(int(min(breite, hoehe) * 0.64), 16)
     name_schrift = max(int(schrift * 0.22), P.S_TICK)
+    # Der Radius gilt in Figurbruchteilen - bei flachen Kacheln wuerde er
+    # sonst groesser als die halbe Hoehe und die Ecken liefen spitz zusammen.
+    radius = min(0.018, 0.3 * hoehe / P.HOEHE)
+    # Fett gesetzte Schrift ist im Mittel gut 0,6 Schriftgroessen breit je
+    # Zeichen - 1,39 rechnet Punkt in Pixel um.
+    name_px_je_zeichen = name_schrift * 1.39 * 0.64
 
     fortschritt = float(np.clip(anteil, 0.0, 1.0)) * n
     for i, taste in enumerate(TASTEN):
@@ -205,9 +239,14 @@ def klassen_tafel(titel: str = "", spalten: int = 2,
         links = P.INHALT_LINKS + spalte * (breite + luecke)
         oben = oben0 + zeile * (hoehe + luecke)
         name = beiname(taste)
+        # Der Beiname braucht Hoehe unter dem Zeichen und Breite fuer sich -
+        # sonst liegt er ueber dem Zeichen oder ragt aus der Kachel.
+        # Unter 140 px Kachelhoehe stoesst ein Komma oder Punkt schon an den Namen.
+        if name and (hoehe < 140 or len(name) * name_px_je_zeichen > breite * 0.9):
+            name = ""
 
         _feld(fig, oben, hoehe, links, breite, theme.farbe(taste),
-              alpha=sichtbar, radius=0.018)
+              alpha=sichtbar, radius=radius)
         fig.text(P.x(links + breite / 2),
                  P.y(oben + hoehe / 2 - (hoehe * 0.07 if name else 0.0)),
                  anzeige(taste), ha="center", va="center", fontsize=schrift,
@@ -262,10 +301,12 @@ def klassen_vergleich(mittel: dict[str, np.ndarray], cfg: Config) -> Figure:
 
 
 # --- 4. Pipeline ----------------------------------------------------------
+# "{ms}" wird beim Zeichnen durch die Segmentlaenge ersetzt - die Grafik soll
+# zeigen, was das Modell tatsaechlich hoert, nicht eine feste Zahl.
 PIPELINE_SCHRITTE = (
     ("taste", "Anschlag"),
     ("mikrofon", "Mikrofon"),
-    ("welle", "400 ms Audio"),
+    ("welle", "{ms} ms Audio"),
     ("mel", "Log-Mel"),
     ("netz", "Neuronales Netz"),
     ("balken", "Klassen"),
@@ -276,9 +317,11 @@ _SCHRITT_ABSTAND = 172
 _ICON = 140
 
 
-def _pipeline_schritt(fig: Figure, nummer: int, anteil: float = 1.0) -> None:
+def _pipeline_schritt(fig: Figure, nummer: int, anteil: float = 1.0,
+                      segment_ms: float = 250.0) -> None:
     """Einen Schritt der Pipeline zeichnen. anteil steuert das Einblenden."""
     schluessel, beschriftung = PIPELINE_SCHRITTE[nummer]
+    beschriftung = beschriftung.format(ms=f"{float(segment_ms):.0f}")
     oben = _SCHRITT_OBEN + nummer * _SCHRITT_ABSTAND
     ax = P.achse(fig, oben=oben, hoehe=_ICON, links=P.INHALT_LINKS, breite=_ICON)
     if schluessel == "balken":
@@ -302,7 +345,8 @@ def _pipeline_verbindung(fig: Figure, nummer: int, anteil: float = 1.0) -> None:
                           linewidth=3.0, zorder=1))
 
 
-def pipeline(cfg: Config, bis_schritt: int | None = None, anteil: float = 1.0) -> Figure:
+def pipeline(cfg: Config, bis_schritt: int | None = None, anteil: float = 1.0,
+             segment_ms: float | None = None) -> Figure:
     """Der Weg vom Anschlag zur Wahrscheinlichkeit.
 
     Senkrechte Abfolge mit gezeichneten Icons statt farbiger Kaesten: nur ein
@@ -311,9 +355,15 @@ def pipeline(cfg: Config, bis_schritt: int | None = None, anteil: float = 1.0) -
 
     bis_schritt und anteil dienen der Animation: Schritte werden nacheinander
     eingeblendet, der Rest bleibt unsichtbar.
+
+    segment_ms ist die Laenge, die das Modell hoert. Wer ein trainiertes
+    Modell hat, gibt dessen Wert mit - die Config kann von einer aelteren
+    Einstellung stammen. Ohne Angabe gilt cfg.segment_ms, also das, womit das
+    naechste Training schneiden wuerde.
     """
     fig = P.figur()
     P.kopf(fig, "Die Pipeline")
+    ms = float(segment_ms if segment_ms is not None else cfg.segment_ms)
     letzter = len(PIPELINE_SCHRITTE) - 1 if bis_schritt is None else bis_schritt
     for i in range(len(PIPELINE_SCHRITTE)):
         if i > letzter:
@@ -321,7 +371,7 @@ def pipeline(cfg: Config, bis_schritt: int | None = None, anteil: float = 1.0) -
         teil = 1.0 if i < letzter else anteil
         if i > 0:
             _pipeline_verbindung(fig, i - 1, 1.0 if i < letzter else anteil * 1.6)
-        _pipeline_schritt(fig, i, teil)
+        _pipeline_schritt(fig, i, teil, segment_ms=ms)
     return fig
 
 
@@ -462,7 +512,7 @@ def konfusionsmatrix(matrix: np.ndarray, genauigkeit: float,
     fig.text(P.x(P.INHALT_LINKS), P.y(524), "richtig erkannt",
              fontsize=P.S_TICK, color=theme.TEXT_SCHWACH, va="center")
     fig.text(P.x(P.INHALT_RECHTS), P.y(430),
-             f"Zufall  {zufall() * 100:.0f} %", fontsize=P.S_TICK,
+             f"Zufall  {_prozent(zufall())} %", fontsize=P.S_TICK,
              color=theme.TEXT_SCHWACH, ha="right", va="center")
 
     kante = P.ACHSE_BREITE
@@ -532,7 +582,16 @@ def vorhersage(vorgabe: str | None, wahrscheinlichkeiten: dict[str, float],
     n = len(TASTEN)
     spalten = 1 if n <= 14 else 2
     zeilen = -(-n // spalten)
-    oben, platz = 430, 880
+    # Der untere Block ist fest verankert: die Zeichenfolge auf 1422, darueber
+    # "richtig" (190 unter dem Ergebnisfeld) und das Feld selbst. Die Liste
+    # teilt sich den Platz darueber - so laeuft sie bei vielen Klassen nicht in
+    # das Ergebnisfeld und das Feld nicht in die Zeichenfolge. 280 = 190 bis
+    # "richtig", dessen halbe Hoehe, Luft und die halbe Zeichenfolge; bis acht
+    # Klassen bleibt das Bild dabei unveraendert.
+    sequenz_y = 1422
+    ergebnis_max = sequenz_y - 280
+    oben = 430
+    platz = ergebnis_max - 42 - oben
     zeile = min(80.0, platz / zeilen)
     hoehe = zeile * 0.72
     spalten_luecke = 44
@@ -566,7 +625,7 @@ def vorhersage(vorgabe: str | None, wahrscheinlichkeiten: dict[str, float],
                      color=theme.TEXT if fuehrend else theme.TEXT_SCHWACH,
                      ha="right", va="center", zorder=3)
 
-    ergebnis = oben + zeilen * zeile + 42
+    ergebnis = min(oben + zeilen * zeile + 42, ergebnis_max)
     if ergebnis_auf > 0:
         _feld(fig, ergebnis, 138, P.INHALT_LINKS, P.INHALT_BREITE,
               theme.farbe(beste), alpha=ergebnis_auf)
@@ -583,7 +642,15 @@ def vorhersage(vorgabe: str | None, wahrscheinlichkeiten: dict[str, float],
                  color=theme.OK if richtig else theme.FEHLER, va="center")
 
     if sequenz:
-        fig.text(P.x(P.INHALT_LINKS), P.y(1422), sequenz.upper(), fontsize=54,
+        # In 54 pt Monospace passen 17 Zeichen in die Inhaltsbreite. Laengere
+        # Folgen werden kleiner gesetzt, ab 30 pt zeigt die Zeile nur noch das
+        # Ende - die neuesten Zeichen sind die, um die es gerade geht.
+        text = "".join(anzeige(c) for c in sequenz)
+        groesse = min(54, int(54 * 17 / len(text)))
+        if groesse < 30:
+            groesse = 30
+            text = "…" + text[-(int(17 * 54 / 30) - 1):]
+        fig.text(P.x(P.INHALT_LINKS), P.y(sequenz_y), text, fontsize=groesse,
                  family="monospace", fontweight="bold", color=theme.TEXT, va="center")
     return fig
 
@@ -595,9 +662,12 @@ def ergebnis_vergleich(stufen: list[tuple[str, float, str]],
     """Alle gemessenen Trefferquoten nebeneinander.
 
     Die wichtigste Grafik des Projekts: Sie zeigt nicht die beste Zahl, sondern
-    alle - vom Zufall ueber das Verfahren ohne Lernen bis zu dem, was bei
-    fluessigem Tippen uebrig bleibt. Wer nur die 99 % zeigt, erzaehlt die
-    Haelfte.
+    alle gemessenen - vom Zufall bis zur ungesehenen Testsitzung. Wer nur die
+    99 % zeigt, erzaehlt die Haelfte. Was nicht gemessen wurde, gehoert nicht
+    hinein.
+
+    Die Werte stehen mit einer Nachkommastelle, wo sie etwas sagt: Zufall bei
+    acht Klassen ist 12,5 %, nicht 12 %.
 
     stufen: Liste aus (Beschriftung, Anteil 0..1, Farbe).
     """
@@ -607,7 +677,7 @@ def ergebnis_vergleich(stufen: list[tuple[str, float, str]],
 
     if hero is not None:
         name, wert = hero
-        P.hero(fig, f"{wert * 100:.0f} %", 452, theme.OK, fontsize=88)
+        P.hero(fig, f"{_prozent(wert)} %", 452, theme.OK, fontsize=88)
         fig.text(P.x(P.INHALT_LINKS), P.y(546), name, fontsize=P.S_TICK,
                  color=theme.TEXT_SCHWACH, va="center")
 
@@ -624,7 +694,15 @@ def ergebnis_vergleich(stufen: list[tuple[str, float, str]],
                   radius=0.008, zorder=3)
         if auf > 0.3:
             fig.text(P.x(P.INHALT_RECHTS), P.y(y0 + hoehe / 2),
-                     f"{wert * 100:.0f}%", fontsize=P.S_ZAHL, family="monospace",
+                     f"{_prozent(wert)}%", fontsize=P.S_ZAHL, family="monospace",
                      fontweight="bold", color=theme.TEXT, ha="right", va="center",
                      alpha=min((auf - 0.3) / 0.4, 1.0), zorder=3)
     return fig
+
+
+def _prozent(wert: float) -> str:
+    """Anteil als Prozentzahl mit deutschem Komma, ",0" faellt weg."""
+    text = f"{wert * 100:.1f}"
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text.replace(".", ",")
