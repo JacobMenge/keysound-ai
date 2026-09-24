@@ -146,17 +146,41 @@ def finde_transienten(x: np.ndarray, cfg: Config, min_abstand_ms: float = 150.0
     return (spitzen * h + w // 2).astype(int), rausch_db
 
 
+def onset_wie_beim_aufnehmen(fenster: np.ndarray, cfg: Config, spitze: int,
+                             toleranz_ms: float = 20.0) -> int:
+    """Onset in einem Kontextfenster so bestimmen, wie es der Collector tut.
+
+    Die Live-Demo muss das Segment an derselben Stelle schneiden wie das
+    Training, sonst sieht das Modell einen um Millisekunden verschobenen
+    Ausschnitt und trifft messbar schlechter. Deshalb laeuft zuerst genau
+    die Analyse, mit der beim Aufnehmen der Onset gemessen wurde.
+
+    Uebernommen wird das Ergebnis nur, wenn analysiere() dieselbe Spitze
+    gefunden hat, die der Detektor gemeldet hat (bis toleranz_ms daneben),
+    und der Onset nicht hinter ihr liegt. Stellt ein Nachbaranschlag im
+    Fenster das Maximum, faellt es auf onset_zu_spitze() zurueck, das nur
+    lokal vor der Spitze sucht.
+    """
+    a = analysiere(fenster, cfg)
+    toleranz = int(toleranz_ms / 1000.0 * cfg.samplerate)
+    if (a.gefunden and abs(a.peak_sample - spitze) <= toleranz
+            and a.onset_sample <= spitze):
+        return int(a.onset_sample)
+    return onset_zu_spitze(fenster, cfg, spitze)
+
+
 def onset_zu_spitze(x: np.ndarray, cfg: Config, spitze: int,
                     rueckblick_ms: float = 40.0, abfall_db: float = 40.0,
                     korrektur_ms: float = 12.0) -> int:
     """Von einem erkannten Maximum lokal zum Beginn des Anschlags zurueckgehen.
 
-    analysiere() sucht den lautesten Punkt im ganzen Fenster und verfolgt von
-    dort zurueck. Das geht schief, sobald mehrere Anschlaege im Fenster liegen
-    - dann landet man beim falschen. Hier wird nur ein kurzes Stueck vor der
-    uebergebenen Spitze betrachtet, und die Schwelle haengt an der Spitze
-    selbst statt am Rauschboden. Damit stoert auch das Ausklingen des
-    vorherigen Anschlags nicht.
+    Rueckfall fuer onset_wie_beim_aufnehmen(). analysiere() sucht den
+    lautesten Punkt im ganzen Fenster und verfolgt von dort zurueck. Das geht
+    schief, sobald mehrere Anschlaege im Fenster liegen - dann landet man beim
+    falschen. Hier wird nur ein kurzes Stueck vor der uebergebenen Spitze
+    betrachtet, und die Schwelle haengt an der Spitze selbst statt am
+    Rauschboden. Damit stoert auch das Ausklingen des vorherigen Anschlags
+    nicht.
     """
     sr = cfg.samplerate
     von = max(0, spitze - int(rueckblick_ms / 1000 * sr))
@@ -175,9 +199,10 @@ def onset_zu_spitze(x: np.ndarray, cfg: Config, spitze: int,
     while i > 0 and env_db[i - 1] > schwelle:
         i -= 1
     # analysiere() geht bis dicht an den Rauschboden zurueck und landet damit
-    # rund 12 ms frueher. Dieser feste Ausgleich bringt beide Verfahren auf
-    # denselben Punkt - gemessen an 120 aufgenommenen Anschlaegen betraegt der
-    # Restversatz danach unter 4 ms.
+    # im Mittel frueher. Der feste Ausgleich naehert beide Verfahren nur an:
+    # Auf den aufgenommenen Sitzungen bleiben im Median 4 bis 8 ms Versatz,
+    # bei den meisten Anschlaegen mehr als 4 ms. Deshalb ist das hier nur der
+    # Rueckfall, wenn analysiere() die Spitze nicht sauber trifft.
     roh = von + i * h + w // 2 - int(korrektur_ms / 1000.0 * sr)
     return int(min(max(roh, 0), x.size - 1))
 

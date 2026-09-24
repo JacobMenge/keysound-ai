@@ -20,7 +20,7 @@ Zwei Dinge macht dieses Modul:
 from __future__ import annotations
 
 import ctypes
-from ctypes import wintypes
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -28,7 +28,14 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
 from . import theme
-from .config import TASTEN, AUSGABE, beiname
+from .config import AUSGABE
+
+# wintypes gibt es nur unter Windows sicher - auf anderen Systemen wird die
+# Bildschirmgroesse ueber Tk abgefragt (siehe arbeitsflaechen()).
+try:
+    from ctypes import wintypes
+except (ImportError, ValueError):  # pragma: no cover - nur ausserhalb Windows
+    wintypes = None
 
 # --- Leinwand -------------------------------------------------------------
 BREITE, HOEHE = 1080, 1920
@@ -124,16 +131,6 @@ def achse_aufraeumen(ax, x_ticks=None, y_ticks=None, rahmen: bool = False) -> No
             ax.spines[seite].set_linewidth(1.4)
 
 
-def kernband() -> tuple[float, float, float, float]:
-    """Kernband in Figurkoordinaten (links, unten, breite, hoehe)."""
-    return (
-        SICHER_LINKS / BREITE,
-        SICHER_UNTEN / HOEHE,
-        (BREITE - SICHER_LINKS - SICHER_RECHTS) / BREITE,
-        (HOEHE - SICHER_OBEN - SICHER_UNTEN) / HOEHE,
-    )
-
-
 # --- Grafiken -------------------------------------------------------------
 def figur() -> Figure:
     """Leere Flaeche in exakt 1080 x 1920 Pixeln."""
@@ -153,34 +150,6 @@ def fuss(fig: Figure, text: str = ""):
         return None
     return fig.text(x(INHALT_LINKS), y(1600), text, fontsize=S_TICK,
                     color=theme.TEXT_SCHWACH, va="top", ha="left", linespacing=1.8)
-
-
-def tastenlegende(fig: Figure, y_px: float = 1420, fontsize: int = 28) -> None:
-    """Farbcode der Klassen, bei vielen Klassen mehrzeilig.
-
-    Jede Klasse steht in einem farbigen Feld. Ohne Feld waere ein Satzzeichen
-    als Klasse praktisch unsichtbar - ein Pixel neben lauter Buchstaben.
-    """
-    n = len(TASTEN)
-    pro_zeile = min(n, 10)
-    zeilen = -(-n // pro_zeile)
-    if zeilen > 1:
-        fontsize = max(int(fontsize * 0.62), 16)
-    breite = INHALT_BREITE / pro_zeile
-    hoehe = fontsize * 2.2
-    for i, taste in enumerate(TASTEN):
-        zeile, spalte = divmod(i, pro_zeile)
-        # Bei mehreren Zeilen die letzte, evtl. kuerzere Zeile mittig setzen.
-        in_zeile = min(pro_zeile, n - zeile * pro_zeile)
-        versatz = (pro_zeile - in_zeile) / 2 * breite
-        fig.text(
-            x(INHALT_LINKS + versatz + breite * (spalte + 0.5)),
-            y(y_px + zeile * hoehe), taste.upper(),
-            fontsize=fontsize, fontweight="bold", color=theme.BG,
-            ha="center", va="center",
-            bbox=dict(boxstyle="round,pad=0.42", facecolor=theme.farbe(taste),
-                      edgecolor="none"),
-        )
 
 
 def sicherheitszonen(fig: Figure) -> None:
@@ -206,24 +175,33 @@ def exportiere(fig: Figure, name: str, unterordner: str = "") -> Path:
     ziel = AUSGABE / unterordner if unterordner else AUSGABE
     ziel.mkdir(parents=True, exist_ok=True)
     pfad = ziel / f"{name}_{datetime.now():%Y%m%d_%H%M%S}.png"
-    # Kein bbox_inches="tight": das wuerde die Masse wieder veraendern.
-    fig.savefig(pfad, dpi=DPI, facecolor=fig.get_facecolor())
+    # Ein verkleinertes Live-Fenster rundet die Figur auf ganze Bildschirm-
+    # pixel - dann kaemen ein, zwei Pixel zu wenig heraus. Deshalb fuer das
+    # Speichern die Sollgroesse setzen und danach die alte zurueckgeben.
+    alt = fig.get_size_inches().copy()
+    fig.set_size_inches(BREITE / DPI, HOEHE / DPI, forward=False)
+    try:
+        # Kein bbox_inches="tight": das wuerde die Masse wieder veraendern.
+        fig.savefig(pfad, dpi=DPI, facecolor=fig.get_facecolor())
+    finally:
+        fig.set_size_inches(alt, forward=False)
     return pfad
 
 
-def prompt_text(taste: str) -> tuple[str, str]:
-    """Grosses Zeichen und erklaerender Beiname fuer die Prompt-Anzeige."""
-    return taste.upper(), beiname(taste)
-
-
 # --- Fenster --------------------------------------------------------------
-class _MONITORINFO(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("rcMonitor", wintypes.RECT),
-        ("rcWork", wintypes.RECT),
-        ("dwFlags", wintypes.DWORD),
-    ]
+if wintypes is not None:
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+# Was ausserhalb von Windows fuer Menueleiste, Dock oder Panel abgezogen wird.
+# Tk kennt dort nur die ganze Bildschirmgroesse, nicht die Arbeitsflaeche.
+# macOS: Menueleiste und Dock zusammen oft um 100 px, Linux: ein Panel.
+RAND_OHNE_ARBEITSFLAECHE = 100 if sys.platform == "darwin" else 60
 
 
 def dpi_bewusst() -> None:
@@ -244,8 +222,50 @@ def dpi_bewusst() -> None:
 
 
 def arbeitsflaechen() -> list[tuple[int, int, int, int]]:
-    """Nutzbare Flaeche je Monitor als (x, y, breite, hoehe)."""
+    """Nutzbare Flaeche je Monitor als (x, y, breite, hoehe).
+
+    Unter Windows exakt je Monitor. Laesst sich das nicht abfragen (macOS,
+    Linux), gilt der Bildschirm, den Tk kennt, abzueglich eines Randes -
+    sonst wuerde jedes Fenster in voller 1080 x 1920 geoeffnet und liefe auf
+    einem Querformat-Bildschirm unten heraus.
+    """
+    gefunden = _arbeitsflaechen_windows()
+    return gefunden or _bildschirm_tk()
+
+
+def _bildschirm_tk() -> list[tuple[int, int, int, int]]:
+    """Bildschirmgroesse ueber Tk - Rueckfall ausserhalb von Windows.
+
+    Gibt es schon ein Tk-Fenster, wird es benutzt, sonst kurz ein
+    unsichtbares angelegt (wie in bedienung.pixelfaktor).
+    """
+    import tkinter as tk
+
+    wurzel = getattr(tk, "_default_root", None)
+    eigene = wurzel is None
+    try:
+        if eigene:
+            wurzel = tk.Tk()
+            wurzel.withdraw()
+        b, h = int(wurzel.winfo_screenwidth()), int(wurzel.winfo_screenheight())
+    except Exception:  # noqa: BLE001 - ohne Fenstersystem bleibt nichts
+        return []
+    finally:
+        if eigene and wurzel is not None:
+            try:
+                wurzel.destroy()
+            except Exception:  # noqa: BLE001, S110
+                pass
+    if b <= 0 or h <= RAND_OHNE_ARBEITSFLAECHE:
+        return []
+    return [(0, 0, b, h - RAND_OHNE_ARBEITSFLAECHE)]
+
+
+def _arbeitsflaechen_windows() -> list[tuple[int, int, int, int]]:
+    """Arbeitsflaeche je Monitor ueber die Windows-API, sonst leer."""
     gefunden: list[tuple[int, int, int, int]] = []
+    if wintypes is None or not hasattr(ctypes, "windll"):
+        return gefunden
     try:
         user32 = ctypes.windll.user32
         rueckruf = ctypes.WINFUNCTYPE(

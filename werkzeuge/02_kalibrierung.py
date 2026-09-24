@@ -52,7 +52,10 @@ from matplotlib import colormaps  # noqa: E402
 from matplotlib.patches import Polygon  # noqa: E402
 
 from tastenakustik import audio, bedienung, features, onset, theme  # noqa: E402
-from tastenakustik.config import Config, TASTEN, verzeichnisse_anlegen  # noqa: E402
+from tastenakustik.config import (Config, TASTEN, anzeige,  # noqa: E402
+                                  verzeichnisse_anlegen,
+    laden_oder_beenden,
+)
 
 NFFT = 512
 METER_MIN = -70.0
@@ -78,12 +81,38 @@ LAYOUT = {
         "spek": (766, 258, A_L, A_B), "h_spek": 730,
         "meter": (1148, 56, A_L, A_B), "h_meter": 1112,
     },
+    # Auf der Buehne bleibt alles zwischen 240 und 1480 px: darunter blenden
+    # Shorts, Reels und TikTok Bildunterschrift und Fortschrittsbalken ein.
     "buehne": {
-        "welle": (352, 496, A_L, A_B), "h_welle": 302,
-        "spek": (962, 420, A_L, A_B), "h_spek": 912,
-        "meter": (1572, 58, A_L, A_B), "h_meter": 1522,
+        "welle": (322, 400, A_L, A_B), "h_welle": 290,
+        "spek": (800, 330, A_L, A_B), "h_spek": 766,
+        "meter": (1316, 58, A_L, A_B), "h_meter": 1282,
     },
 }
+
+# Ab hier gilt ein Sample als uebersteuert (-0,2 dBFS). Zwei Ueberschreitungen
+# gehoeren zu derselben Uebersteuerung, solange weniger als CLIP_LUECKE_S
+# dazwischen liegt - ein uebersteuerter Anschlag schwingt ueber viele Samples.
+CLIP_GRENZE = 10 ** (-0.2 / 20)
+CLIP_LUECKE_S = 0.05
+
+
+def kurzname(name: str) -> str:
+    """Der aussagekraeftige Teil eines Geraetenamens.
+
+    Windows nennt Eingaenge "Mikrofon (RODECaster Duo Chat)" - das Wort vor
+    der Klammer ist bei allen gleich, der Name steht in der Klammer. Innere
+    Klammern ("Realtek(R) Audio") bleiben erhalten, ein von MME gekuerzter
+    Name ohne schliessende Klammer ebenso.
+    """
+    name = (name or "").strip()
+    i = name.find(" (")
+    if i < 0:
+        return name
+    kurz = name[i + 2:].strip()
+    if kurz.endswith(")"):
+        kurz = kurz[:-1].strip()
+    return kurz or name
 
 
 class Kalibrierung:
@@ -94,6 +123,11 @@ class Kalibrierung:
         self.ring = audio.Ringpuffer(cfg)
         self.peak_hold = METER_MIN
         self.clips = 0
+        # Bis wohin das Signal auf Uebersteuerung geprueft ist, und wo die
+        # letzte lag (absolute Sample-Indizes) - so zaehlt jede Uebersteuerung
+        # einmal, nicht in jedem Bild, in dem sie noch zu sehen ist.
+        self._clip_stand = 0
+        self._clip_letzte = -(10 ** 12)
         self.eingefroren = False
         self.voll_skala = False
         self.zonen_sichtbar = False
@@ -112,7 +146,9 @@ class Kalibrierung:
     def _baue_figur(self) -> None:
         theme.anwenden("hochformat")
         bedienung.tastenkuerzel_aus()
-        self.masse = bedienung.LiveMasse()
+        # Sieben Knoepfe brechen auf einem verkleinerten Fenster in drei
+        # Zeilen um - dafuer muss unten Platz bleiben.
+        self.masse = bedienung.LiveMasse(knopfzeilen=3)
         self.fig = plt.figure(
             figsize=(portrait.BREITE / portrait.DPI, portrait.HOEHE / portrait.DPI),
             dpi=self.masse.dpi, facecolor=theme.BG,
@@ -175,7 +211,7 @@ class Kalibrierung:
         self.chrome: list = [portrait.kopf(self.fig, "Kalibrierung")]
         self.chrome.append(self.fig.text(
             portrait.x(portrait.INHALT_RECHTS), portrait.y(382),
-            f"{self.cfg.device_name.split(' (')[0][:24]}   {self.cfg.samplerate} Hz",
+            f"{kurzname(self.cfg.device_name)[:24]}   {self.cfg.samplerate} Hz",
             fontsize=portrait.S_TICK, color=theme.TEXT_SCHWACH, ha="right", va="center"))
         self.t_urteil = self.fig.text(
             portrait.x(portrait.INHALT_LINKS), portrait.y(1274), "",
@@ -288,6 +324,8 @@ class Kalibrierung:
     def _peak_zuruecksetzen(self) -> None:
         self.peak_hold = METER_MIN
         self.clips = 0
+        # Was schon im Bild steht, zaehlt nach dem Zuruecksetzen nicht neu.
+        self._clip_stand = self.ring.gesamt
 
     def _skala_umschalten(self) -> None:
         self.voll_skala = not self.voll_skala
@@ -308,6 +346,8 @@ class Kalibrierung:
             return False
 
         x = self.ring.letzte(self.laenge)
+        gesamt = self.ring.gesamt
+        self._zaehle_clips(gesamt)
         n = self.t.size
         if x.size < n:
             x = np.concatenate([np.zeros(n - x.size, dtype=np.float32), x])
@@ -348,26 +388,20 @@ class Kalibrierung:
         peak = float(20.0 * np.log10(max(spitze_abs, 1e-9)))
         rms = audio.rms_dbfs(x[::8])
         self.peak_hold = max(self.peak_hold, peak)
-        if peak >= -0.2:
-            self.clips += 1
         self.balken.set_width(max(rms, METER_MIN) - METER_MIN)
         self.balken.set_color(theme.pegel_farbe(peak))
         self.hold_linie.set_xdata([self.peak_hold, self.peak_hold])
 
         # Die Anschlagssuche filtert das ganze Fenster und kostet spuerbar.
-        # Sie laeuft deshalb nur jedes n-te Bild; die Treffer werden als
-        # absolute Samplepositionen gemerkt und danach nur mitgeschoben.
-        basis = self.ring.gesamt - n
+        # Sie laeuft deshalb nur jedes n-te Bild - auch in der Stille, wenn
+        # gar kein Marker zu sehen ist; die Treffer werden als absolute
+        # Samplepositionen gemerkt und danach nur mitgeschoben.
+        basis = gesamt - n
         self.bild_nr += 1
-        if self.bild_nr % MARKER_TAKT == 1 or not self.marker_abs:
+        if self.bild_nr % MARKER_TAKT == 1:
             spitzen, self.rausch_db = onset.finde_transienten(x, self.cfg)
             self.marker_abs = [basis + int(i) for i in spitzen[-MAX_MARKER:]]
-            if spitzen.size:
-                i = int(spitzen[-1])
-                umfeld = x[max(0, i - 600): i + 2400]
-                if umfeld.size:
-                    s = audio.peak_dbfs(umfeld)
-                    self.letzter_anschlag = (s, s - self.rausch_db)
+            self._letzten_anschlag_messen(x, spitzen)
         for k, linie in enumerate(self.marker):
             rel = self.marker_abs[k] - basis if k < len(self.marker_abs) else -1
             if 0 <= rel < n:
@@ -381,6 +415,56 @@ class Kalibrierung:
         if not self.buehne:
             self._kennzahlen(peak)
         return struktur
+
+    def _zaehle_clips(self, gesamt: int) -> None:
+        """Nur neu hinzugekommene Samples auf Uebersteuerung pruefen.
+
+        Die Spitze des ganzen Fensters taugt dafuer nicht: Ein einziges
+        uebersteuertes Sample steht drei Sekunden im Bild und wuerde in jedem
+        Bild erneut gezaehlt - bei 30 Bildern je Sekunde rund neunzigmal.
+
+        Der neue Abschnitt wird ueber absolute Indizes geholt, nicht vom Ende
+        des Live-Fensters abgezaehlt: Zwischen dem Lesen des Fensters und
+        dem Zaehlerstand kann der Audio-Thread schon einen Block angehaengt
+        haben - der bliebe sonst ungeprueft.
+        """
+        von = max(self._clip_stand, gesamt - self.t.size)
+        self._clip_stand = gesamt
+        if gesamt <= von:
+            return
+        neu = self.ring.fenster_absolut(von, gesamt - von)
+        if neu is None or not neu.size:
+            return
+        idx = np.flatnonzero(np.abs(neu) >= CLIP_GRENZE)
+        if not idx.size:
+            return
+        absolut = von + idx
+        vorher = np.concatenate([[self._clip_letzte], absolut[:-1]])
+        luecke = int(CLIP_LUECKE_S * self.cfg.samplerate)
+        self.clips += int(np.sum(absolut - vorher > luecke))
+        self._clip_letzte = int(absolut[-1])
+
+    def _letzten_anschlag_messen(self, x: np.ndarray, spitzen: np.ndarray) -> None:
+        """Spitze und Abstand des letzten Anschlags - gemessen wie im Collector.
+
+        Der Abstand zum Rauschen kommt aus onset.analysiere() auf einem
+        Fenster in der Laenge, die der Collector speichert. Sonst waere die
+        Kalibrierung rund 9 dB optimistischer und meldete "brauchbar", wo der
+        Collector die Anschlaege als zu leise verwirft. Genommen wird der
+        juengste Anschlag, dessen Fenster schon vollstaendig im Puffer ist.
+        """
+        sr = self.cfg.samplerate
+        vor = int(self.cfg.pre_roll_ms / 1000 * sr)
+        nach = int(self.cfg.post_roll_ms / 1000 * sr)
+        for i in (int(s) for s in spitzen[::-1]):
+            if i - vor < 0 or i + nach > x.size:
+                continue
+            a = onset.analysiere(x[i - vor: i + nach], self.cfg)
+            # Die angezeigte Spitze bleibt die des Anschlags selbst - sie
+            # dient der Aussteuerung.
+            umfeld = x[max(0, i - 600): i + 2400]
+            self.letzter_anschlag = (audio.peak_dbfs(umfeld), a.snr_db)
+            return
 
     def _kennzahlen(self, peak: float) -> None:
         abstand = self.letzter_anschlag[1] if self.letzter_anschlag else None
@@ -484,9 +568,13 @@ def main() -> int:
     p.add_argument("--buehne", action="store_true",
                    help="aufgeraeumte Ansicht fuer die Aufnahme")
     args = p.parse_args()
+    # Obergrenze, weil jedes Bild Spektrogramm und Anschlagssuche ueber das
+    # ganze Fenster rechnet - bei Minuten bricht die Bildrate ein.
+    if not 0 < args.sekunden <= 30:
+        p.error("--sekunden muss groesser als 0 und hoechstens 30 sein")
 
     verzeichnisse_anlegen()
-    cfg = Config.laden()
+    cfg = laden_oder_beenden()
     if args.geraet is not None:
         g = audio.geraet_finden(args.geraet)
         if g is None:
@@ -498,8 +586,12 @@ def main() -> int:
         print("Keine Konfiguration gefunden. Bitte zuerst: python werkzeuge/01_systemcheck.py")
         return 1
 
+    # Der Ring muss das ganze Live-Fenster halten, sonst bleibt links eine
+    # Nulllinie stehen.
+    cfg.ring_sekunden = max(cfg.ring_sekunden, args.sekunden + 0.5)
+
     print(f"Geraet   {cfg.device_name} ({cfg.hostapi}, {cfg.samplerate} Hz)")
-    print(f"Klassen  {'  '.join(t.upper() for t in TASTEN)}")
+    print(f"Klassen  {'  '.join(anzeige(t) for t in TASTEN)}")
     print(f"Fenster  1080 x 1920, {BILDRATE} Bilder je Sekunde")
     print("Bedienung mit der Maus: Knoepfe unter dem Bild oder Rechtsklick.\n")
     kalibrierung = Kalibrierung(cfg, args.sekunden, args.buehne)

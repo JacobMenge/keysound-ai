@@ -109,7 +109,10 @@ def anwenden(groesse: str = "normal") -> None:
             "xtick.labelsize": 10 * skala,
             "ytick.labelsize": 10 * skala,
             "text.color": TEXT,
-            "font.family": "sans-serif",
+            # Als Liste, damit Matplotlib je Zeichen auf DejaVu Sans
+            # zurueckfaellt: Segoe UI hat kein Leertasten-Zeichen, und ohne
+            # Rueckfall stuende in jeder Kachel ein Ersatzkasten.
+            "font.family": ["sans-serif", "DejaVu Sans"],
             "font.sans-serif": SCHRIFTEN,
             "font.size": 11 * skala,
             "legend.facecolor": PANEL,

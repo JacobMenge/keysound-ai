@@ -30,9 +30,18 @@ from . import portrait, theme
 
 # Hoehe, die ein Fenster ueber der Leinwand braucht (Titelleiste), und der
 # Platz, der bei einem verkleinerten Fenster zusaetzlich fuer die Knopfleiste
-# frei bleibt. In echten Pixeln bei 100 % Skalierung.
+# frei bleibt. In echten Pixeln bei 100 % Skalierung. RAND_KLEIN reicht fuer
+# zwei Knopfzeilen; jede weitere Zeile braucht KNOPFZEILE mehr.
 RAND_NATIV = 40
 RAND_KLEIN = 130
+KNOPFZEILE = 40
+
+# Rechte Maustaste: Unter Tk auf dem Mac ist das Button-2 (je nach Tk-Version
+# auch Button-3), dazu Ctrl+Klick als Ersatz fuer Maeuse mit einer Taste.
+if sys.platform == "darwin":
+    MENUE_KLICKS = ("<Button-2>", "<Button-3>", "<Control-Button-1>")
+else:
+    MENUE_KLICKS = ("<Button-3>",)
 
 
 def tastenkuerzel_aus() -> None:
@@ -81,9 +90,14 @@ class LiveMasse:
     Passt die Leinwand in echten 1080 x 1920 Pixeln auf einen Monitor, bleibt
     es dabei - so wird gefilmt. Sonst wird die ganze Figur verkleinert,
     Schrift eingeschlossen, statt unten aus dem Bildschirm zu laufen.
+
+    knopfzeilen: in wie viele Zeilen die Knopfleiste auf einem verkleinerten,
+    schmalen Fenster umbricht. Die Kalibrierung hat sieben Knoepfe und
+    braucht drei, die Demo zwei - pauschal drei wuerde die Demo unnoetig
+    verkleinern.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, knopfzeilen: int = 2) -> None:
         self.flaeche = portrait.beste_flaeche(RAND_NATIV)
         self.faktor = pixelfaktor()
         self.skala = 1.0
@@ -91,8 +105,9 @@ class LiveMasse:
             _, _, b, h = self.flaeche
             if b < portrait.BREITE or h < portrait.HOEHE + RAND_NATIV:
                 # Titelleiste und Knopfleiste wachsen mit der Skalierung, und
-                # auf einem schmalen Fenster bricht die Leiste zweizeilig um.
-                rand = round(RAND_KLEIN * self.faktor)
+                # auf einem schmalen Fenster bricht die Leiste in Zeilen um.
+                rand = round((RAND_KLEIN + max(knopfzeilen - 2, 0) * KNOPFZEILE)
+                             * self.faktor)
                 self.skala = max(min((h - rand) / portrait.HOEHE,
                                      (b - 24) / portrait.BREITE, 1.0), 0.25)
         # Matplotlib multipliziert die dpi spaeter mit dem Pixelfaktor. Hier
@@ -124,12 +139,20 @@ class Bedienung:
     Python-Code dieses Fensters.
     """
 
-    HINWEIS = "Rechtsklick: Menü"
+    HINWEIS = ("Rechtsklick/Ctrl-Klick: Menü" if sys.platform == "darwin"
+               else "Rechtsklick: Menü")
     RAND_X, RAND_Y = 14, 6
 
     def __init__(self, fig, eintraege: list[tuple[str, Callable[[], None]]],
-                 breite: int | None = None):
+                 breite: int | None = None,
+                 bei_klick: Callable[[], None] | None = None):
+        """bei_klick laeuft vor jedem Befehl und beim Oeffnen des Menues.
+
+        Die Demo blendet damit das Klickgeraeusch der Maus aus - sonst kann
+        es als Anschlag zaehlen, gerade beim Umschalten zum Filmen.
+        """
         self.fig = fig
+        self._bei_klick = bei_klick
         manager = fig.canvas.manager
         self.leinwand = fig.canvas.get_tk_widget()
         self.fenster = manager.window
@@ -163,9 +186,19 @@ class Bedienung:
 
         self.menue = tk.Menu(self.leinwand, tearoff=0)
         for beschriftung, befehl in eintraege:
-            self.menue.add_command(label=beschriftung, command=befehl)
-        self.leinwand.bind("<Button-3>", self._menue_zeigen, add="+")
+            self.menue.add_command(label=beschriftung,
+                                   command=lambda b=befehl: self._ausfuehren(b))
+        for sequenz in MENUE_KLICKS:
+            self.leinwand.bind(sequenz, self._menue_zeigen, add="+")
         self.zeigen(True)
+
+    def _geklickt(self) -> None:
+        if self._bei_klick is not None:
+            self._bei_klick()
+
+    def _ausfuehren(self, befehl: Callable[[], None]) -> None:
+        self._geklickt()
+        befehl()
 
     def _knopf(self, text: str, befehl: Callable[[], None], schrift) -> tk.Label:
         """Flacher Knopf aus einem Label.
@@ -176,7 +209,7 @@ class Bedienung:
         knopf = tk.Label(self.innen, text=text, font=schrift, bg=theme.PANEL,
                          fg=theme.TEXT, padx=12, pady=5, cursor="hand2",
                          takefocus=0)
-        knopf.bind("<Button-1>", lambda _e: befehl())
+        knopf.bind("<Button-1>", lambda _e: self._ausfuehren(befehl))
         knopf.bind("<Enter>", lambda _e: knopf.configure(bg=theme.GRID))
         knopf.bind("<Leave>", lambda _e: knopf.configure(bg=theme.PANEL))
         return knopf
@@ -200,6 +233,7 @@ class Bedienung:
         self.leiste.configure(height=self.innen.winfo_reqheight() + 2 * self.RAND_Y)
 
     def _menue_zeigen(self, ereignis) -> None:  # noqa: ANN001
+        self._geklickt()
         try:
             self.menue.tk_popup(ereignis.x_root, ereignis.y_root)
         finally:
