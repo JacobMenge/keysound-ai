@@ -14,7 +14,9 @@ Grenzen, die im Code verankert sind:
     gerade angezeigten Prompt passt.
   * Die Promptfolge ist zufaellig. Ist in der Konfiguration eine Sperrfolge
     gesetzt, kommt sie nie zusammenhaengend vor - schon beim Ziehen der Folge
-    ausgeschlossen und vor jedem Lauf noch einmal geprueft.
+    ausgeschlossen und vor jedem Lauf noch einmal geprueft. Das gilt fuer die
+    angezeigte Folge, auch wenn verworfene Tasten wieder eingereiht werden.
+    (In der gespeicherten Folge liegen dazwischen die verworfenen Anschlaege.)
 
 Das Fenster ist 1080 x 1920 gross und legt sich von selbst auf einen
 Hochformat-Monitor, falls einer vorhanden ist.
@@ -53,12 +55,15 @@ from matplotlib.figure import Figure
 
 from tastenakustik import audio, bedienung, features, onset, portrait, storage, theme
 from tastenakustik.config import (
+    ZIEL_MAX,
+    ZIEL_MIN,
     Config,
     KlassenFehler,
     TASTEN,
     anzeige,
     beiname,
     ist_demo_taste,
+    laden_oder_beenden,
     pruefe_keine_sperrfolge,
     verzeichnisse_anlegen,
 )
@@ -70,14 +75,30 @@ HOP = 64
 H_KOPF_LEER = 150
 H_KOPF = 60
 H_PROMPT = 460
-H_STATUS = 66
 H_FIGUR = 600
 H_FORTSCHRITT = 300
 H_FUSS = 170
 
 
+def _gesperrt(sperrfolge: str) -> str:
+    """Die wirksame Sperrfolge - leer, wenn sie ohnehin nie vorkommen kann."""
+    sperre = (sperrfolge or "").lower()
+    if sperre and any(c not in TASTEN for c in sperre):
+        sperre = ""
+    return sperre
+
+
+def verletzt(folge: list[str], sperre: str, dreier: bool = True) -> bool:
+    """True, wenn die Folge die Sperrfolge oder (optional) eine Dreierreihe enthaelt."""
+    if sperre and sperre in "".join(folge):
+        return True
+    return dreier and any(folge[i] == folge[i - 1] == folge[i - 2]
+                          for i in range(2, len(folge)))
+
+
 def erzeuge_folge(ziel: int, rng: random.Random, sperrfolge: str = "",
-                  versuche: int = 200) -> list[str]:
+                  versuche: int = 200, praefix: list[str] | None = None,
+                  rest: dict[str, int] | None = None) -> list[str]:
     """Ausgewogene, gemischte Promptfolge - hoechstens zwei gleiche in Reihe.
 
     Zufaellige Reihenfolge ist zwingend: Wuerden wir alle A hintereinander
@@ -90,19 +111,25 @@ def erzeuge_folge(ziel: int, rng: random.Random, sperrfolge: str = "",
     Dreierreihe oder die Sperrfolge vollenden wuerde. Einfach mischen und
     hinterher pruefen reicht nicht: Bei einem kurzen Wort steckt es in einer
     Folge von einigen hundert Zeichen fast immer irgendwo drin.
+
+    praefix und rest dienen dem Neuziehen mitten in einer Sitzung: praefix
+    sind die schon gezeigten Prompts (nur Kontext, nicht Teil des Ergebnisses),
+    rest die noch offenen Anzahlen je Taste statt ziel fuer jede.
     """
-    sperre = (sperrfolge or "").lower()
-    if sperre and any(c not in TASTEN for c in sperre):
-        sperre = ""                   # kann ohnehin nie vorkommen
+    sperre = _gesperrt(sperrfolge)
     if len(sperre) == 1:
         raise KlassenFehler(
             f"Die Sperrfolge {sperre!r} ist ein einzelnes Zeichen - das laesst "
             "sich nicht aufnehmen, ohne es zu verwenden.")
 
-    gesamt = ziel * len(TASTEN)
+    # Vom Praefix zaehlt nur das Ende, das mit dem Neuen eine Sperrfolge
+    # oder Dreierreihe bilden koennte.
+    kontext = list(praefix or [])[-max(len(sperre) - 1, 2):]
+    soll = dict(rest) if rest is not None else {t: ziel for t in TASTEN}
+    gesamt = len(kontext) + sum(soll.values())
     for _ in range(versuche):
-        rest = {t: ziel for t in TASTEN}
-        folge: list[str] = []
+        rest = dict(soll)
+        folge: list[str] = list(kontext)
         while len(folge) < gesamt:
             kandidaten = [t for t, n in rest.items() if n > 0]
             if len(folge) >= 2 and folge[-1] == folge[-2]:
@@ -120,7 +147,7 @@ def erzeuge_folge(ziel: int, rng: random.Random, sperrfolge: str = "",
             rest[wahl] -= 1
         if len(folge) == gesamt:
             pruefe_keine_sperrfolge(folge, sperre)
-            return folge
+            return folge[len(kontext):]
     raise KlassenFehler(
         f"Mit den Klassen {''.join(TASTEN)} laesst sich keine Aufnahmefolge "
         f"bilden, in der {sperrfolge!r} nicht vorkommt. Eine laengere "
@@ -148,6 +175,14 @@ class Collector(tk.Tk):
         self.sitzung: storage.Sitzung | None = None
         self.zustand = "start"
         self.warteschlange: list[str] = []
+        # Alle bisher angezeigten Prompts in Reihenfolge - gegen dieses Ende
+        # wird eine verworfene Taste wieder eingereiht.
+        self.gezeigt: list[str] = []
+        # Anschlaege ohne Audiofenster in Folge - ab drei liefert das
+        # Mikrofon offenbar nichts mehr.
+        self.fehl_in_folge = 0
+        # Stand des Aussetzer-Zaehlers beim aktuellen Prompt.
+        self.stoerungen_stand = 0
         self.aktuelle_taste = ""
         self.t_taste = 0.0
         self.t_prompt = 0.0
@@ -409,9 +444,14 @@ class Collector(tk.Tk):
         if self.zustand != "start":
             return
         try:
-            self.ziel = max(1, int(self.ziel_var.get()))
+            ziel = int(self.ziel_var.get().strip())
         except ValueError:
-            self.ziel = 40
+            ziel = 0
+        if not ZIEL_MIN <= ziel <= ZIEL_MAX:
+            self._startfehler(
+                f"Proben je Taste: eine ganze Zahl von {ZIEL_MIN} bis {ZIEL_MAX}.")
+            return
+        self.ziel = ziel
         # Erst die Folge, dann das Mikrofon, dann der Sitzungsordner: Scheitert
         # ein Schritt, bleibt kein leerer Sitzungsordner in daten/roh/ liegen.
         try:
@@ -432,6 +472,7 @@ class Collector(tk.Tk):
             mikrofon_position=self.felder["mikrofon_position"].get().strip(),
         )
         self.warteschlange = folge
+        self.gezeigt = []
         self.t_start = time.perf_counter()
         self.start.pack_forget()
         self.mess.pack(fill="both", expand=True)
@@ -453,8 +494,10 @@ class Collector(tk.Tk):
             self._fertig()
             return
         self.aktuelle_taste = self.warteschlange.pop(0)
+        self.gezeigt.append(self.aktuelle_taste)
         self.prompt_nr += 1
         self.t_prompt = time.perf_counter()
+        self.stoerungen_stand = self._stoerungen()
         self.zustand = "warte"
         self._zeichne_prompt()
         self._rec_anzeige()
@@ -501,43 +544,139 @@ class Collector(tk.Tk):
         self.zustand = "verarbeitet"   # genau eine Probe je Anschlag
         fenster = self.ring.fenster_um_taste(self.t_taste)
         if fenster is None:
-            self._verwerfen("kein_fenster")
+            self.fehl_in_folge += 1
+            self._verwerfen("kein_fenster", still=True)
+            if self.fehl_in_folge >= 3:
+                # Sonst endlos: jeder Anschlag verworfen, wieder eingereiht,
+                # und man liest nur "Audiofenster nicht verfuegbar".
+                self.fehl_in_folge = 0
+                self._anhalten("Mikrofon liefert kein Signal - „Weiter“ startet es neu",
+                               theme.FEHLER)
+            else:
+                self.after(self.cfg.pause_nach_probe_ms, self._naechster_prompt)
             return
+        self.fehl_in_folge = 0
 
         anschlag = onset.analysiere(fenster, self.cfg)
         self.letztes_fenster = fenster
+        # Aussetzer seit dem Prompt - die Probe bleibt, ist aber markiert,
+        # damit die Datenpruefung sie zaehlen oder ausschliessen kann.
+        aussetzer = max(0, self._stoerungen() - self.stoerungen_stand)
 
         if anschlag.brauchbar:
-            self.sitzung.speichere(
-                fenster, self.aktuelle_taste, anschlag,
-                extra={
-                    "prompt_index": self.prompt_nr,
-                    "reaktionszeit_ms": round((self.t_taste - self.t_prompt) * 1000, 1),
-                    "stream_latenz_ms": round(self.ring.latenz_s * 1000, 2),
-                },
-            )
+            try:
+                self.sitzung.speichere(
+                    fenster, self.aktuelle_taste, anschlag,
+                    extra={
+                        "prompt_index": self.prompt_nr,
+                        "reaktionszeit_ms": round((self.t_taste - self.t_prompt) * 1000, 1),
+                        "stream_latenz_ms": round(self.ring.latenz_s * 1000, 2),
+                        "audio_stoerungen": aussetzer,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Datei gesperrt, Platte voll, Virenscanner: Taste neu
+                # einreihen und anhalten statt einzufrieren - und einen
+                # dauerhaften Fehler nicht endlos wiederholen.
+                self._verwerfen("speicherfehler", still=True)
+                print(f"Speichern fehlgeschlagen: {exc!r}", file=sys.stderr)
+                self._anhalten(f"Speichern fehlgeschlagen: {self._kurzgrund(exc)}",
+                               theme.FEHLER)
+                return
             n = self.sitzung.zaehler[self.aktuelle_taste]
             self._status(f"gespeichert   {n}/{self.ziel}   "
-                         f"Abstand {anschlag.snr_db:.0f} dB", theme.OK)
+                         f"Abstand {anschlag.snr_db:.0f} dB"
+                         + ("   Audio-Aussetzer" if aussetzer else ""),
+                         theme.WARN if aussetzer else theme.OK)
         else:
             self._verwerfen(anschlag.grund, still=True)
 
-        self._zeichne_probe(fenster, anschlag)
-        self._zeichne_fortschritt()
+        try:
+            self._zeichne_probe(fenster, anschlag)
+            self._zeichne_fortschritt()
+        except Exception as exc:  # noqa: BLE001
+            # Nur die Anzeige - die Probe ist schon gespeichert, also nicht
+            # neu einreihen. Die Aufnahme laeuft weiter.
+            print(f"Anzeige fehlgeschlagen: {exc!r}", file=sys.stderr)
+            self._status(f"Anzeige fehlgeschlagen: {self._kurzgrund(exc)}", theme.WARN)
         self.after(self.cfg.pause_nach_probe_ms, self._naechster_prompt)
+
+    @staticmethod
+    def _kurzgrund(exc: BaseException) -> str:
+        """Fehlergrund fuer die Statuszeile - ohne Pfad, hoechstens 32 Zeichen.
+
+        Die Statuszeile ist im Hochformat-Layout genau eine Zeile. Eine
+        Meldung mit Dateipfad liefe links und rechts aus dem Fenster und
+        zeigte nur ihre Mitte; die ganze Meldung steht deshalb auf stderr.
+        """
+        grund = getattr(exc, "strerror", None) or str(exc) or type(exc).__name__
+        return grund if len(grund) <= 32 else grund[:31] + "…"
+
+    def _stoerungen(self) -> int:
+        """Aussetzer-Zaehler des Rings (0 bei einem Ring ohne Zaehler)."""
+        return int(getattr(self.ring, "stoerungen_n", 0))
+
+    def _anhalten(self, text: str, farbe: str) -> None:
+        """Aus der Verarbeitung heraus pausieren und den Grund stehen lassen.
+
+        Beim Fortsetzen oeffnet ring.start() das Mikrofon neu, und der
+        naechste Prompt kommt sofort - es ist keiner mehr angesetzt.
+        """
+        self._pause_umschalten()
+        self.prompt_offen = True
+        self._status(text, farbe)
 
     def _verwerfen(self, grund: str, still: bool = False) -> None:
         if self.sitzung is not None:
             self.sitzung.notiere_verwurf(grund)
         # Probe kommt spaeter noch einmal dran, damit das Ziel erreicht wird.
-        if self.warteschlange:
-            self.warteschlange.insert(self.rng.randrange(0, len(self.warteschlange)),
-                                      self.aktuelle_taste)
-        else:
-            self.warteschlange.append(self.aktuelle_taste)
-        self._status(f"verworfen: {onset.GRUND_TEXT.get(grund, grund)}", theme.WARN)
+        text = f"verworfen: {onset.GRUND_TEXT.get(grund, grund)}"
+        if not self._wieder_einreihen(self.aktuelle_taste):
+            text += " - nicht wiederholt (Sperrfolge)"
+        self._status(text, theme.WARN)
         if not still:
             self.after(self.cfg.pause_nach_probe_ms, self._naechster_prompt)
+
+    def _wieder_einreihen(self, taste: str) -> bool:
+        """Verworfene Taste so einreihen, dass die Zusagen der Folge halten.
+
+        Geprueft wird gegen das, was tatsaechlich auf dem Schirm stand -
+        einschliesslich der gerade verworfenen Taste: Weder die Sperrfolge
+        noch drei Gleiche in Reihe duerfen entstehen. Passt keine Stelle,
+        wird der Rest mit demselben Verfahren wie am Anfang neu gezogen.
+        Geht auch das nicht (kurz vor Schluss), gibt die Dreierreihe nach,
+        nie die Sperrfolge - dann entfaellt die Wiederholung lieber.
+        """
+        sperre = _gesperrt(self.cfg.sperrfolge)
+        rand = max(len(sperre) - 1, 2)
+        q = self.warteschlange
+        stellen = list(range(len(q) + 1))
+        self.rng.shuffle(stellen)
+
+        def passt(i: int, dreier: bool) -> bool:
+            # Eine neue Verletzung muss die eingefuegte Taste enthalten -
+            # es reicht also das Stueck um die Einfuegestelle.
+            vorher = (self.gezeigt[-rand:] + q[max(0, i - rand):i])[-rand:]
+            return not verletzt(vorher + [taste] + q[i:i + rand], sperre, dreier)
+
+        for i in stellen:
+            if passt(i, dreier=True):
+                q.insert(i, taste)
+                return True
+        try:
+            rest = {t: 0 for t in TASTEN}
+            for t in q + [taste]:
+                rest[t] += 1
+            self.warteschlange = erzeuge_folge(0, self.rng, self.cfg.sperrfolge,
+                                               praefix=self.gezeigt, rest=rest)
+            return True
+        except KlassenFehler:
+            pass
+        for i in stellen:
+            if passt(i, dreier=False):
+                q.insert(i, taste)
+                return True
+        return False
 
     # -- Anzeige --------------------------------------------------------
     def _status(self, text: str, farbe: str) -> None:
@@ -649,8 +788,14 @@ class Collector(tk.Tk):
             try:
                 self.ring.start()
             except RuntimeError as exc:
-                self._status(f"Mikrofon nicht verfügbar: {exc}", theme.FEHLER)
+                # Die Meldung (Geraetename, Host-API) ist fuer die eine
+                # Statuszeile zu lang - ganz auf stderr, kurz im Fenster.
+                print(f"Mikrofon nicht verfügbar: {exc}", file=sys.stderr)
+                self._status("Mikrofon nicht verfügbar - angesteckt? "
+                             "Sonst in Schritt 1 neu wählen", theme.FEHLER)
                 return
+            # Der Ring zaehlt nach dem Neustart wieder ab null.
+            self.stoerungen_stand = self._stoerungen()
             self.b_pause.configure(text="Pause (Esc)")
             self._status("weiter", theme.TEXT_SCHWACH)
             if self.prompt_offen:
@@ -720,6 +865,12 @@ class Collector(tk.Tk):
         self._bericht()
 
     def _beenden(self) -> None:
+        if self.zustand == "fertig":
+            # _fertig hat schon abgeschlossen und berichtet - ein zweites
+            # Mal wuerde "beendet" mit der Schliesszeit ueberschreiben.
+            self.ring.stop()
+            self.destroy()
+            return
         self.zustand = "fertig"
         self.ring.stop()
         if self.sitzung is not None:
@@ -758,10 +909,12 @@ def main() -> int:
     p.add_argument("--buehne", action="store_true",
                    help="ohne Sitzungskennung und Tastenhinweise - zum Filmen")
     args = p.parse_args()
+    if args.ziel is not None and not ZIEL_MIN <= args.ziel <= ZIEL_MAX:
+        p.error(f"--ziel: eine ganze Zahl von {ZIEL_MIN} bis {ZIEL_MAX}")
 
     verzeichnisse_anlegen()
     portrait.dpi_bewusst()
-    cfg = Config.laden()
+    cfg = laden_oder_beenden()
     if args.geraet is not None:
         g = audio.geraet_finden(args.geraet)
         if g is None:
@@ -773,7 +926,8 @@ def main() -> int:
         print("Keine Konfiguration gefunden. Bitte zuerst: python werkzeuge/01_systemcheck.py")
         return 1
 
-    Collector(cfg, args.ziel, args.seed, args.buehne).mainloop()
+    ziel = args.ziel if args.ziel is not None else cfg.ziel_pro_taste
+    Collector(cfg, ziel, args.seed, args.buehne).mainloop()
     return 0
 
 

@@ -12,7 +12,10 @@ Neuronen wie es Klassen gibt.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+import os
+import sys
+import time
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -49,8 +52,48 @@ NAMEN = {
 }
 
 
+# Erlaubte Proben je Taste - Studio und Collector pruefen gegen dieselben
+# Grenzen. Unter 5 taugt eine Sitzung nicht zum Lernen, ueber 200 wird die
+# Promptfolge unhandlich lang.
+ZIEL_MIN, ZIEL_MAX = 5, 200
+
+
 class KlassenFehler(ValueError):
     """Eine Klassenliste, mit der sich nicht arbeiten laesst."""
+
+
+class ConfigFehler(ValueError):
+    """config.json ist nicht lesbar oder enthaelt ungueltige Werte."""
+
+
+def schreibe_atomar(pfad: Path, text: str, versuche: int = 10) -> None:
+    """Datei so ersetzen, dass Leser nie eine halbe oder leere Datei sehen.
+
+    Erst in eine Nachbardatei schreiben, dann per os.replace austauschen.
+    Unter Windows schlaegt os.replace fehl, solange ein anderer Prozess die
+    Zieldatei gerade offen hat (etwa das Studio beim Einlesen) - deshalb
+    einige kurze Wiederholungen. Klappt es gar nicht, wird direkt
+    geschrieben: Lieber kurz nicht atomar als die Daten verlieren.
+    """
+    # Je Prozess eine eigene Nachbardatei: Schreiben Collector und Studio
+    # zugleich dieselbe session.json, darf keiner die halbe Datei des
+    # anderen einsetzen oder an ihrem Verschwinden scheitern.
+    tmp = pfad.with_name(f"{pfad.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    for _ in range(versuche):
+        try:
+            os.replace(tmp, pfad)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    pfad.write_text(text, encoding="utf-8")
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
 
 
 def pruefe_klassen(zeichen) -> list[str]:
@@ -97,8 +140,15 @@ def anzeige(taste: str) -> str:
 
     Die Leertaste bekommt ein sichtbares Zeichen - als Leerzeichen stuende
     sie in jeder Tabelle, Kachel und Matrix als Luecke da.
+
+    Ein Anschlag ist immer genau ein Zeichen. Wird ein Zeichen gross
+    geschrieben zu zweien ('ß' -> 'SS'), bleibt es klein - sonst saehe es
+    aus wie zweimal S.
     """
-    return "␣" if taste == " " else taste.upper()
+    if taste == " ":
+        return "␣"
+    gross = taste.upper()
+    return gross if len(gross) == len(taste) else taste
 
 
 def beiname(taste: str) -> str:
@@ -191,22 +241,88 @@ class Config:
     def speichern(self, pfad: Path | None = None) -> Path:
         pfad = pfad or CONFIG_PFAD
         pfad.parent.mkdir(parents=True, exist_ok=True)
-        pfad.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False),
-                        encoding="utf-8")
+        schreibe_atomar(pfad, json.dumps(asdict(self), indent=2, ensure_ascii=False))
         return pfad
+
+    def _typen_pruefen(self) -> None:
+        """Jeden Wert gegen den Typ seines Standardwerts pruefen.
+
+        Ein Tippfehler von Hand ("samplerate": "48000") fiele sonst erst tief
+        im Audio- oder Trainingscode auf, mit einer Meldung ohne Bezug zur
+        config.json. Ganzzahlige Kommazahlen (250.0) werden still zu int.
+        """
+        for feld in fields(self):
+            wert, standard = getattr(self, feld.name), feld.default
+            if isinstance(wert, bool) and not isinstance(standard, bool):
+                ok = False
+            elif standard is None or isinstance(standard, int):
+                if isinstance(wert, float) and wert.is_integer():
+                    wert = int(wert)
+                    setattr(self, feld.name, wert)
+                ok = isinstance(wert, int) or (standard is None and wert is None)
+            elif isinstance(standard, float):
+                ok = isinstance(wert, (int, float))
+            elif isinstance(standard, str):
+                ok = isinstance(wert, str)
+            else:
+                ok = True
+            if not ok:
+                if isinstance(standard, str):
+                    erwartet = "Text"
+                elif isinstance(standard, float):
+                    erwartet = "eine Zahl"
+                else:
+                    erwartet = "eine ganze Zahl"
+                raise ValueError(f"{feld.name!r} hat den Wert {wert!r} - erwartet "
+                                 f"{erwartet}")
 
     @classmethod
     def laden(cls, pfad: Path | None = None, anwenden: bool = True) -> "Config":
+        """config.json lesen - bei Fehlern ein ConfigFehler mit Pfad und Zeile.
+
+        Bewusst kein stiller Rueckfall auf Standardwerte: Der naechste
+        speichern()-Aufruf wuerde sonst Jacobs echte Konfiguration
+        (Mikrofon, Klassen) mit den Standardwerten ueberschreiben.
+        """
         pfad = pfad or CONFIG_PFAD
+        ausweg = ("Die Datei korrigieren - oder loeschen, dann gelten die "
+                  "Standardwerte und Mikrofon und Klassen werden neu gewaehlt.")
         if pfad.exists():
-            daten = json.loads(pfad.read_text(encoding="utf-8"))
+            try:
+                daten = json.loads(pfad.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ConfigFehler(
+                    f"{pfad} ist kein gueltiges JSON (Zeile {exc.lineno}, Spalte "
+                    f"{exc.colno}: {exc.msg}).\n{ausweg}") from exc
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ConfigFehler(f"{pfad} laesst sich nicht lesen: {exc}") from exc
+            if not isinstance(daten, dict):
+                raise ConfigFehler(f"{pfad} enthaelt kein JSON-Objekt.\n{ausweg}")
             gueltig = set(cls.__dataclass_fields__)
-            cfg = cls(**{k: v for k, v in daten.items() if k in gueltig})
+            try:
+                cfg = cls(**{k: v for k, v in daten.items() if k in gueltig})
+                cfg._typen_pruefen()
+                pruefe_klassen(cfg.klassen)
+            except (TypeError, ValueError) as exc:
+                raise ConfigFehler(f"{pfad}: {exc}\n{ausweg}") from exc
         else:
             cfg = cls()
         if anwenden:
             cfg.anwenden()
         return cfg
+
+
+def laden_oder_beenden(anwenden: bool = True) -> Config:
+    """Config.laden fuer die Werkzeuge: bei Fehlern Meldung statt Traceback.
+
+    Die Meldung geht auf stderr - aus dem Studio gestartet liest es sie mit
+    und zeigt sie an. Der Exit-Code 1 sagt dem Studio, dass es nicht ging.
+    """
+    try:
+        return Config.laden(anwenden=anwenden)
+    except ConfigFehler as exc:
+        print(f"Konfiguration fehlerhaft: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 def verzeichnisse_anlegen() -> None:

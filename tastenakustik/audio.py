@@ -18,11 +18,14 @@ import sounddevice as sd
 
 from .config import Config
 
-# Hostapis nach Eignung fuer dieses Experiment (niedrige, stabile Latenz).
+# Hostapis nach Eignung fuer dieses Experiment. ASIO und WDM-KS reichen das
+# Signal am Effektpaket der Windows-Audio-Engine vorbei durch. WASAPI kann
+# leise Transienten glaetten (siehe README) - Jacobs WASAPI-Sitzung verlor
+# drei Viertel der Anschlaege, die WDM-KS-Sitzungen keinen.
 HOSTAPI_RANG = {
-    "Windows WASAPI": 0,
     "ASIO": 0,
-    "Windows WDM-KS": 1,
+    "Windows WDM-KS": 0,
+    "Windows WASAPI": 1,
     "Windows DirectSound": 2,
     "MME": 3,
 }
@@ -96,6 +99,59 @@ def geraet_finden(suche: str | int | None) -> Geraet | None:
     return next((g for g in alle if klein in g.name.lower()), None)
 
 
+def neu_einlesen() -> None:
+    """PortAudio neu starten, damit umgesteckte Geraete auftauchen.
+
+    PortAudio liest die Geraeteliste nur einmal beim Start. Ein Prozess, der
+    lange laeuft (das Studio), sieht ein neu angestecktes Headset sonst nie.
+    Nur aufrufen, solange in diesem Prozess kein Stream offen ist.
+    """
+    sd._terminate()
+    sd._initialize()
+
+
+def geraet_aufloesen(cfg: Config) -> int | None:
+    """Den aktuellen PortAudio-Index des gespeicherten Mikrofons finden.
+
+    Die Indizes verschieben sich, sobald ein Audiogeraet dazukommt oder
+    wegfaellt (USB-Headset, Webcam, Bluetooth). Massgeblich ist deshalb der
+    gespeicherte Name samt Host-API; der Index ist nur die Vorauswahl.
+    Ohne gespeicherten Namen (alte oder handgemachte Konfiguration) bleibt
+    es beim Index. Ist das Mikrofon nicht mehr da oder nicht eindeutig,
+    bricht das mit einer klaren Meldung ab, statt still ein anderes Geraet
+    aufzunehmen.
+    """
+    name = (cfg.device_name or "").strip()
+    if not name:
+        return cfg.device
+    try:
+        alle = eingaenge()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Audio-Geraete nicht lesbar: {exc}") from exc
+
+    def passt(g: Geraet) -> bool:
+        return g.name == name and (not cfg.hostapi or g.hostapi == cfg.hostapi)
+
+    if any(g.index == cfg.device and passt(g) for g in alle):
+        return cfg.device
+    treffer = [g for g in alle if passt(g)]
+    if not treffer:
+        raise RuntimeError(
+            f"Mikrofon {name!r} ({cfg.hostapi or 'Host-API unbekannt'}) ist nicht "
+            "mehr da - angesteckt? Sonst in Schritt 1 neu waehlen.")
+    if cfg.hostapi and len(treffer) > 1:
+        raise RuntimeError(
+            f"Mikrofon {name!r} ({cfg.hostapi}) gibt es {len(treffer)}-mal - "
+            "in Schritt 1 das richtige neu waehlen.")
+    # Ohne gespeicherte Host-API: die beste nach HOSTAPI_RANG, wie eingaenge()
+    # sie ohnehin zuerst listet.
+    g = treffer[0]
+    if g.index != cfg.device:
+        print(f"Hinweis: {g.name} ({g.hostapi}) steht jetzt unter Index {g.index} "
+              f"statt {cfg.device}.")
+    return g.index
+
+
 def bestes_format(geraet: Geraet, wunsch_sr: int) -> tuple[int, int]:
     """Funktionierende (samplerate, kanaele) fuer dieses Geraet ermitteln.
 
@@ -144,7 +200,11 @@ class Ringpuffer:
         self._n_anker = 0    # Stand von _total zu diesem Zeitpunkt
         self._lock = threading.Lock()
         self._stream: sd.InputStream | None = None
-        self.stoerungen: list[str] = []
+        # Aussetzer (Overflow) seit start() - als Zaehler, damit ein langer
+        # Lauf keinen Speicher frisst. Der Collector vermerkt je Probe, wie
+        # viele in ihre Zeit fielen.
+        self.stoerungen_n = 0
+        self.letzte_stoerung = ""
         self.latenz_s = cfg.latenz_ms / 1000.0
 
     # -- Lebenszyklus ---------------------------------------------------
@@ -159,11 +219,17 @@ class Ringpuffer:
             self._buf[:] = 0.0
             self._pos = 0
             self._total = 0
-        self.stoerungen.clear()
+        self.stoerungen_n = 0
+        self.letzte_stoerung = ""
+        # Der Index kann seit der Wahl in Schritt 1 gewandert sein. Nur im
+        # Speicher korrigieren - wer die Konfiguration speichert, entscheidet
+        # das Studio, sonst schreiben Studio und Werkzeug gegeneinander.
+        self.cfg.device = geraet_aufloesen(self.cfg)
         letzter_fehler: Exception | None = None
         for kanaele in dict.fromkeys([self.cfg.channels, 2]):
+            stream = None
             try:
-                self._stream = sd.InputStream(
+                stream = sd.InputStream(
                     samplerate=self.cfg.samplerate,
                     blocksize=self.cfg.blocksize,
                     device=self.cfg.device,
@@ -172,11 +238,19 @@ class Ringpuffer:
                     latency="low",
                     callback=self._callback,
                 )
-                self._stream.start()
+                stream.start()
+                self._stream = stream
                 break
             except Exception as exc:  # noqa: BLE001, PERF203
                 letzter_fehler = exc
-                self._stream = None
+                # Ein geoeffneter, aber nicht gestarteter Stream haelt das
+                # Geraet fest - unter WDM-KS exklusiv, dann scheitert auch
+                # der Versuch mit zwei Kanaelen und jeder weitere Start.
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:  # noqa: BLE001
+                        pass
         if self._stream is None:
             raise RuntimeError(
                 f"Audioeingang {self.cfg.device} ({self.cfg.device_name}) liess sich "
@@ -185,12 +259,22 @@ class Ringpuffer:
         self.latenz_s = float(self._stream.latency)
 
     def stop(self) -> None:
+        """Stream anhalten und schliessen - wirft nie.
+
+        Auf einem abgezogenen Geraet kann schon stream.stop() eine
+        PortAudioError werfen. Wer gerade pausieren oder aufraeumen will,
+        soll daran nicht mitten im Tk-Callback scheitern.
+        """
         if self._stream is not None:
             stream, self._stream = self._stream, None
             try:
                 stream.stop()
-            finally:
+            except Exception:  # noqa: BLE001
+                pass
+            try:
                 stream.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def __enter__(self) -> "Ringpuffer":
         self.start()
@@ -202,7 +286,8 @@ class Ringpuffer:
     # -- Callback (Audio-Thread) ----------------------------------------
     def _callback(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
         if status:
-            self.stoerungen.append(str(status))
+            self.stoerungen_n += 1
+            self.letzte_stoerung = str(status)
         x = indata[:, 0] if indata.ndim > 1 else indata
         n = x.shape[0]
         with self._lock:
