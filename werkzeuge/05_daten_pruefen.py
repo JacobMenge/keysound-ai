@@ -33,7 +33,7 @@ import numpy as np
 import soundfile as sf
 
 from tastenakustik import datensatz, features, plots, portrait, storage
-from tastenakustik.config import ROH, TASTEN, Config, anzeige
+from tastenakustik.config import ROH, TASTEN, Config, anzeige, laden_oder_beenden
 
 GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
 
@@ -82,11 +82,17 @@ def abklingzeit_ms(x: np.ndarray, sr: int, ab_db: float = ABFALL_DB
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Aufgenommene Sitzung pruefen")
-    p.add_argument("--sitzung", default=None, help="Session-ID, sonst die neueste")
-    p.add_argument("--bild", action="store_true", help="Uebersicht nach ausgabe")
+    # Der Aufruf-Block aus dem Docstring erscheint unter --help als Beispiel.
+    p = argparse.ArgumentParser(
+        description="Aufgenommene Sitzung pruefen",
+        epilog=__doc__[__doc__.index("Aufruf:"):],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--sitzung", default=None,
+                   help="Session-ID, sonst die neueste mit Proben")
+    p.add_argument("--bild", action="store_true",
+                   help="gemittelte Log-Mel-Bilder je Klasse nach ausgabe/ schreiben")
     args = p.parse_args()
-    Config.laden()   # setzt die gewaehlten Klassen
+    laden_oder_beenden()   # setzt die gewaehlten Klassen
 
     alle = storage.sitzungen()
     if not alle:
@@ -114,6 +120,7 @@ def main() -> int:
         wert = kopf.get(feld) or f"{GRAU}(leer){AUS}"
         print(f"  {name:<10} {wert}")
     print(f"  {'Geraet':<10} {cfg.device_name}  ({cfg.samplerate} Hz)")
+    passt = True
     try:
         datensatz.pruefe_passend(kopf)
         datensatz.pruefe_labels(kopf, proben)
@@ -121,6 +128,7 @@ def main() -> int:
         # Trotzdem pruefen - Pegel und Signalweg sagen auch dann etwas. Nur
         # die Zaehlung je Klasse laeuft ueber die Klassen dieser Sitzung.
         print(f"\n  {GELB}{fehler}{AUS}")
+        passt = False
     klassen = list(kopf.get("tasten") or TASTEN)
 
     # --- 1. Vollstaendigkeit -------------------------------------------
@@ -215,7 +223,13 @@ def main() -> int:
                   f"Weiche Oberflaechen helfen.{AUS}")
 
     # --- 4. Bild -------------------------------------------------------
-    if args.bild:
+    if args.bild and not passt:
+        # Das Bild zeichnet die eingestellten Klassen. Fuer eine Sitzung mit
+        # anderen Klassen entstuenden leere Felder - und das unter demselben
+        # Dateinamen wie das echte Bild aus 06_trennbarkeit.
+        print(f"\n  {GRAU}Bild uebersprungen: Die Klassen der Sitzung passen nicht "
+              f"zur Einstellung.{AUS}")
+    elif args.bild:
         # Derselbe Schnitt wie in 06_trennbarkeit - sonst entstehen unter
         # demselben Dateinamen zwei verschieden geschnittene Bilder.
         n_seg = int(cfg.segment_ms / 1000 * sr)

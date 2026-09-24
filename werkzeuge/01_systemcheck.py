@@ -20,7 +20,8 @@ import numpy as np
 import sounddevice as sd
 
 from tastenakustik import audio
-from tastenakustik.config import CONFIG_PFAD, Config, TASTEN, verzeichnisse_anlegen
+from tastenakustik.config import (CONFIG_PFAD, TASTEN, anzeige,
+                                  laden_oder_beenden, verzeichnisse_anlegen)
 
 GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
 
@@ -93,6 +94,16 @@ def messen(g: audio.Geraet, sekunden: float, samplerate: int, kanaele: int) -> b
 
     if stumm:
         print(f"  {ROT}Kein Signal. Mikrofon stummgeschaltet oder falscher Eingang?{AUS}")
+        # Dieselbe Totenstille erzeugen auch ein Noise Gate oder die Windows-
+        # Signalverbesserung - der haeufigste Stolperstein. WDM-KS hilft nur
+        # gegen Letztere, ein Gate am Interface muss dort abgeschaltet werden.
+        # --geraet im Hinweis ist noetig: Ohne config.json bricht 00 sonst ab.
+        print(f"  {GRAU}Moeglich sind auch ein Noise Gate am Interface oder eine "
+              f"Windows-Signalverbesserung am Aufnahmegeraet (Geraeteeigenschaften -> "
+              f"Erweitert). Gegen Letztere hilft dasselbe Geraet ueber WDM-KS statt "
+              f"WASAPI (Index aus der Liste oben, --geraet N).{AUS}")
+        print(f"  {GRAU}Live pruefen: python werkzeuge/00_signalweg.py "
+              f"--geraet {g.index}{AUS}")
         return False
     if rms > -40:
         print(f"  {GELB}Recht lauter Grundpegel. Fuer Transienten ist ein ruhiger "
@@ -105,11 +116,20 @@ def messen(g: audio.Geraet, sekunden: float, samplerate: int, kanaele: int) -> b
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Systemcheck und Mikrofonauswahl")
+    # Der Aufruf-Block aus dem Docstring erscheint unter --help als Beispiel.
+    p = argparse.ArgumentParser(
+        description="Systemcheck und Mikrofonauswahl",
+        epilog=__doc__[__doc__.index("Aufruf:"):],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--liste", action="store_true", help="nur Geraete auflisten")
-    p.add_argument("--geraet", default=None, help="Index oder Namensfragment")
-    p.add_argument("--samplerate", type=int, default=48_000)
-    p.add_argument("--sekunden", type=float, default=2.0)
+    p.add_argument("--geraet", default=None,
+                   help="Index oder Namensfragment, sonst das geeignete mit der "
+                        "niedrigsten Latenz")
+    p.add_argument("--samplerate", type=int, default=48_000,
+                   help="gewuenschte Abtastrate in Hz (Standard 48000); nimmt das "
+                        "Geraet sie nicht an, wird eine passende gewaehlt")
+    p.add_argument("--sekunden", type=float, default=2.0,
+                   help="Dauer der Ruhemessung fuer den Rauschboden in s (Standard 2)")
     args = p.parse_args()
 
     verzeichnisse_anlegen()
@@ -129,7 +149,7 @@ def main() -> int:
         print(f"\n{ROT}Geraet {args.geraet!r} nicht gefunden.{AUS}")
         return 1
     if args.geraet is None:
-        print(f"\n  Vorschlag (niedrigste Latenz unter den geeigneten): {GRUEN}{g.label}{AUS}")
+        print(f"\n  Vorschlag (WDM-KS bevorzugt, siehe README): {GRUEN}{g.label}{AUS}")
 
     sr, kanaele = audio.bestes_format(g, args.samplerate)
     if sr != args.samplerate:
@@ -144,7 +164,7 @@ def main() -> int:
         print(f"\n  {GELB}Konfiguration nicht geaendert.{AUS}")
         return 1
 
-    cfg = Config.laden()
+    cfg = laden_oder_beenden()
     cfg.device = g.index
     cfg.device_name = g.name
     cfg.hostapi = g.hostapi
@@ -159,7 +179,7 @@ def main() -> int:
     print(f"  Samplerate        {cfg.samplerate} Hz, {cfg.channels} Kanal/Kanaele")
     print(f"  Fenster je Taste  {cfg.pre_roll_ms} ms vor + {cfg.post_roll_ms} ms nach "
           f"= {cfg.fenster_samples} Samples")
-    print(f"  Klassen           {' '.join(t.upper() for t in TASTEN)}")
+    print(f"  Klassen           {' '.join(anzeige(t) for t in TASTEN)}")
 
     print(f"\n  Naechster Schritt: {GRUEN}python werkzeuge/02_kalibrierung.py{AUS}")
     return 0

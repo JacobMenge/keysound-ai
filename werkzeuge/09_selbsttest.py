@@ -3,14 +3,20 @@
 Braucht kein Mikrofon und ruehrt deine eigenen Aufnahmen nicht an. Der Test
 erzeugt kuenstliche Anschlaege mit einer klassenspezifischen Klangfarbe,
 schreibt daraus echte Sitzungen in einen Wegwerfordner, laedt sie ueber
-dieselbe Pipeline wie im Ernstfall, trainiert kurz und rendert jede Grafik.
+dieselbe Pipeline wie im Ernstfall, trainiert kurz, prueft das Modell an der
+Testsitzung und rendert jede Grafik.
 
 Damit ist zweierlei geprueft:
 
-  1. Alle Abhaengigkeiten sind da und passen zusammen.
+  1. Alle Abhaengigkeiten sind da und passen zusammen - auch Tk fuer die
+     Fenster und PortAudio fuer das Mikrofon. Geladen wird beides nur, ein
+     Geraet wird nicht geoeffnet: Ob dein Mikrofon ankommt, zeigt erst
+     Schritt 1 im Studio (oder 01_systemcheck.py).
   2. Die Kette Label -> Datei -> Datensatz -> Ausgang des Netzes stimmt.
      Waere sie vertauscht, koennte das Netz die kuenstlichen Klassen nicht
-     trennen - sie sind mit Absicht sehr deutlich verschieden.
+     trennen. Bestanden heisst deutlich ueber Zufall, nicht jede Klasse
+     sauber: Bei sehr vielen Klassen liegen die kuenstlichen Toene eng, und
+     einzelne werden verwechselt - das Fazit nennt sie.
 
 Aufruf:
     python werkzeuge/09_selbsttest.py
@@ -21,6 +27,7 @@ Aufruf:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import tempfile
@@ -56,15 +63,30 @@ class Pruefung:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Selbsttest ohne Mikrofon")
+    # Der Aufruf-Block aus dem Docstring erscheint unter --help als Beispiel.
+    p = argparse.ArgumentParser(
+        description="Selbsttest ohne Mikrofon",
+        epilog=__doc__[__doc__.index("Aufruf:"):],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--klassen", default=STANDARD_TEST_KLASSEN,
-                   help="Zeichensatz, mit dem getestet wird")
+                   help="Zeichensatz, mit dem getestet wird (2 bis 40 Zeichen)")
     p.add_argument("--proben", type=int, default=8,
-                   help="Trainingsproben je Klasse")
-    p.add_argument("--epochen", type=int, default=150)
+                   help="Trainingsproben je Klasse (Standard 8)")
+    p.add_argument("--epochen", type=int, default=150,
+                   help="Anzahl Trainingsdurchlaeufe (Standard 150)")
     p.add_argument("--behalten", action="store_true",
                    help="Wegwerfordner stehen lassen")
     args = p.parse_args()
+    # Vor dem Wegwerfordner pruefen: Ungueltige Angaben sollen eine klare
+    # Meldung geben und keinen Ordner in %TEMP% zuruecklassen.
+    try:
+        config.pruefe_klassen(args.klassen)
+    except config.KlassenFehler as fehler:
+        p.error(f"--klassen: {fehler}")
+    if args.proben < 1:
+        p.error("--proben muss mindestens 1 sein")
+    if args.epochen < 1:
+        p.error("--epochen muss mindestens 1 sein")
 
     tmp = Path(tempfile.mkdtemp(prefix="tastenakustik_test_"))
     # Umlenken, bevor irgendein Modul die echten Ordner anfasst.
@@ -85,11 +107,52 @@ def main() -> int:
 
     ok = Pruefung()
 
+    # --- 0. Umgebung ------------------------------------------------------
+    # Studio und Collector brauchen Tk und PortAudio. Beides fehlt unter Linux
+    # gern als Systempaket - dann startet start.py nicht, und der Rest dieses
+    # Tests wuerde trotzdem bestehen. Kein Stream, kein Mikrofon: nur laden.
+    print("\n0  Umgebung")
+    try:
+        import tkinter
+        tkinter.Tcl()
+        ok("tkinter / Tcl geladen", True, f"Tk {tkinter.TkVersion}")
+    except Exception as fehler:                           # noqa: BLE001
+        ok("tkinter / Tcl geladen", False, f"{type(fehler).__name__}: {fehler} - "
+           "Linux: sudo apt install python3-tk, macOS: brew install python-tk")
+    else:
+        # Ein echtes Fenster braucht ein Display. Ohne (etwa auf einem Server)
+        # wird nur uebersprungen - dort laeuft das Studio ohnehin nicht.
+        if sys.platform in ("win32", "darwin") or os.environ.get("DISPLAY") \
+                or os.environ.get("WAYLAND_DISPLAY"):
+            try:
+                wurzel = tkinter.Tk()
+                wurzel.withdraw()
+                wurzel.destroy()
+                ok("Fenster (Tk) startbar", True)
+            except Exception as fehler:                   # noqa: BLE001
+                ok("Fenster (Tk) startbar", False, f"{type(fehler).__name__}: {fehler}")
+        else:
+            print(f"   {GRAU}----  Fenster (Tk) nicht geprueft - kein Display{AUS}")
+    try:
+        import sounddevice as sd
+        hostapis = [h["name"] for h in sd.query_hostapis()]
+        eingaenge = sum(1 for d in sd.query_devices() if d["max_input_channels"] > 0)
+        ok("sounddevice / PortAudio geladen", True,
+           f"{len(hostapis)} Schnittstellen, {eingaenge} Eingaenge")
+    except Exception as fehler:                           # noqa: BLE001
+        # Unter Windows kommt auch eine kaputte DLL als OSError an.
+        ok("sounddevice / PortAudio geladen", False,
+           f"{type(fehler).__name__}: {fehler} - "
+           "PortAudio fehlt? Linux: sudo apt install libportaudio2")
+
     # --- 1. Klassen -------------------------------------------------------
     print("\n1  Klassen setzen")
     n = len(args.klassen)
     cfg = config.Config(klassen=args.klassen, ziel_pro_taste=args.proben)
     cfg.anwenden()
+    # Auch in den Wegwerfordner schreiben: Wer spaeter Config.laden() ruft,
+    # etwa das Training fuer den Schnitt, sieht dann dieselben Werte.
+    cfg.speichern()
     ok(f"{n} Klassen aktiv", len(config.TASTEN) == n, "".join(config.TASTEN))
     ok("Zufallsniveau", abs(config.zufall() - 1 / n) < 1e-9,
        f"{config.zufall() * 100:.1f} %")
@@ -104,6 +167,15 @@ def main() -> int:
     sr = cfg.samplerate
     rng = np.random.default_rng(7)
 
+    # Grundtoene in 420-Hz-Schritten ab 1800 Hz. Bei mehr als etwa dreissig
+    # Klassen laegen die obersten sonst ueber mel_fmax - im Log-Mel-Bild
+    # unsichtbar und damit nie zu treffen. Dann rueckt das Raster so weit
+    # zusammen, dass auch die zweite Resonanz unter 0,9 * mel_fmax bleibt.
+    # (Gleichmaessig auf der Mel-Skala verteilt trennte das Netz bei dreissig
+    # Klassen schlechter - die tiefen Klassen verloren ihren grossen Abstand.)
+    f_oben = 0.9 * min(cfg.mel_fmax, sr / 2)
+    schritt = min(420.0, (f_oben - 1800 - 0.31 * 900) / max(n - 1, 1))
+
     def anschlag(klasse: str, sitzung_nr: int) -> np.ndarray:
         """Ein Kontextfenster mit genau einem kuenstlichen Anschlag."""
         laenge = int((cfg.pre_roll_ms + cfg.post_roll_ms) / 1000 * sr)
@@ -117,10 +189,11 @@ def main() -> int:
         # Zwei Resonanzen je Klasse; der Sitzungsversatz sorgt dafuer, dass
         # train, val und test nicht dieselben Zahlen enthalten.
         for k, ab in ((1, 0.0), (2, 0.31)):
-            f = 1800 + i * 420 + ab * 900 + sitzung_nr * 12
+            f = 1800 + i * schritt + ab * 900 + sitzung_nr * 12
             x += 0.22 / k * huelle * np.sin(2 * np.pi * f * t + i)
         return (x * rng.uniform(0.8, 1.2)).astype(np.float32)
 
+    geschrieben: dict[str, int] = {}
     for rolle, je_klasse, nr in (("train", args.proben, 0),
                                  ("val", max(args.proben // 2, 4), 1),
                                  ("test", max(args.proben // 2, 4), 2)):
@@ -132,6 +205,7 @@ def main() -> int:
                 if a.gefunden:
                     s.speichere(fenster, klasse, a)
         s.abschliessen()
+        geschrieben[rolle] = s.gesamt
         ok(f"Sitzung {rolle}", s.gesamt == n * je_klasse, f"{s.gesamt} Proben")
 
     # --- 3. Datensatz -----------------------------------------------------
@@ -162,7 +236,9 @@ def main() -> int:
         if isinstance(stand, training.Ergebnis):
             ergebnis = stand
             break
-        if stand.epoche % 50 == 0:
+        # Alle zehn Epochen ein Lebenszeichen - bei vierzig Klassen dauern
+        # fuenfzig Epochen schon eine halbe Minute.
+        if stand.epoche % 10 == 0:
             print(f"   {GRAU}Epoche {stand.epoche:>3}   "
                   f"Val {stand.val_acc * 100:5.1f} %{AUS}")
     ok("Ausgabeschicht passt zur Klassenzahl",
@@ -177,6 +253,18 @@ def main() -> int:
        f"(nötig: {latte * 100:.0f} %)")
     ok("Modell gespeichert",
        ergebnis.modell_pfad is not None and ergebnis.modell_pfad.exists())
+    # Derselbe Weg wie "Auf Testsitzung pruefen" im Studio und 07 --test.
+    # Bewusst ohne Schwelle auf die Quote: Nach kurzem Training kann sie
+    # deutlich unter der Val-Quote liegen, ohne dass etwas kaputt ist.
+    try:
+        t = training.teste(ergebnis.modell_pfad, speichern=False)
+        ok("Testsitzung pruefbar",
+           t.n == geschrieben["test"] and t.konfusion.shape == (n, n)
+           and t.val_quote is not None
+           and list(getattr(t, "klassen", config.TASTEN)) == list(config.TASTEN),
+           f"n={t.n}, {t.quote * 100:.1f} %")
+    except Exception as fehler:                           # noqa: BLE001
+        ok("Testsitzung pruefbar", False, f"{type(fehler).__name__}: {fehler}")
 
     # --- 5. Grafiken ------------------------------------------------------
     print("\n5  Grafiken rendern")
@@ -234,10 +322,18 @@ def main() -> int:
         print(f"{GRAU}Testdaten liegen in {tmp}{AUS}")
         return 1
 
-    print(f"{GRUEN}Alles in Ordnung.{AUS} Die Installation laeuft, und die "
-          f"Pipeline trennt {n} Klassen sauber.")
+    # Ehrlich bleiben: Bestanden heisst "deutlich ueber Zufall", nicht
+    # "jede Klasse sauber". Schwache Klassen nur als Hinweis - bei vier
+    # Val-Proben je Klasse waere eine harte Grenze je Klasse reines Rauschen.
+    print(f"{GRUEN}Alles in Ordnung.{AUS} Die Installation laeuft, und die Zuordnung "
+          f"Label -> Ausgang stimmt ({ergebnis.beste_val * 100:.0f} % statt "
+          f"{config.zufall() * 100:.0f} % Zufall bei {n} Klassen).")
     print(f"{GRAU}Je Klasse: "
           f"{min(quoten.values()) * 100:.0f}-{max(quoten.values()) * 100:.0f} %{AUS}")
+    schwach = [config.anzeige(t) for t, q in quoten.items() if q < 0.5]
+    if schwach:
+        print(f"{GRAU}Schwach bei den kuenstlichen Toenen (unter 50 %): "
+              f"{' '.join(schwach)}{AUS}")
     if args.behalten:
         print(f"{GRAU}Bilder und Testdaten: {tmp}{AUS}")
     else:

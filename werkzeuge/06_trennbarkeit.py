@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -40,7 +41,7 @@ import numpy as np
 import soundfile as sf
 
 from tastenakustik import datensatz, features, plots, portrait, storage
-from tastenakustik.config import ROH, TASTEN, Config, anzeige, zufall
+from tastenakustik.config import ROH, TASTEN, Config, anzeige, zufall, laden_oder_beenden
 
 GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
 
@@ -101,7 +102,10 @@ def naechster_mittelwert(x_train, y_train, x_test) -> np.ndarray:
     vorhanden = [t for t in TASTEN if t in set(y_train)]
     mitten = np.stack([x_train[[i for i, y in enumerate(y_train) if y == t]].mean(axis=0)
                        for t in vorhanden])
-    abstand = ((x_test[:, None, :] - mitten[None, :, :]) ** 2).sum(axis=2)
+    # Klasse fuer Klasse statt als ein Block Proben x Klassen x Merkmale: Der
+    # Block braucht bei vierzig Klassen mehrere GB, so bleibt es bei einer
+    # Matrix Proben x Merkmale. Das Ergebnis ist bitgleich.
+    abstand = np.stack([((x_test - m) ** 2).sum(axis=1) for m in mitten], axis=1)
     return np.array([vorhanden[i] for i in abstand.argmin(axis=1)])
 
 
@@ -113,13 +117,59 @@ def bewerte(y_wahr, y_vorher) -> tuple[float, np.ndarray]:
     return treffer, m
 
 
+def schnitt(kopf: dict) -> tuple:
+    """Was die Form der Log-Mel-Bilder einer Sitzung bestimmt.
+
+    Nur Sitzungen mit gleichem Schnitt lassen sich vergleichen - nach einem
+    Mikrofonwechsel von 48 auf 44,1 kHz sind die Bilder verschieden lang.
+    """
+    a = kopf.get("aufnahmeparameter", {})
+    # Fehlt ein Wert in einer aelteren Sitzung, gilt wie in lade() der
+    # Standardwert - sonst wuerde sie trotz gleichem Schnitt uebergangen.
+    felder = Config.__dataclass_fields__
+    return tuple(a.get(k, felder[k].default)
+                 for k in ("samplerate", "segment_ms", "segment_vor_onset_ms",
+                           "mel_nfft", "mel_hop", "mel_baender"))
+
+
+def abstand_der_aufnahmen(kopf_tr: dict, kopf_te: dict) -> str:
+    """Wie weit Anlern- und Pruefsitzung auseinanderliegen - ohne zu raten."""
+    try:
+        d1 = date.fromisoformat(str(kopf_tr.get("gestartet", ""))[:10])
+        d2 = date.fromisoformat(str(kopf_te.get("gestartet", ""))[:10])
+    except ValueError:
+        return "Die Pruefsitzung ist eine andere Aufnahme."
+    aufbau_gleich = all(kopf_tr.get(f) == kopf_te.get(f)
+                        for f in ("tastatur", "mikrofon_position"))
+    if d1 == d2:
+        return ("Beide Sitzungen stammen vom selben Tag"
+                + (" mit identischem Aufbau" if aufbau_gleich else "")
+                + " -\ndas Ergebnis ist deshalb optimistisch. Der ehrliche Test kommt"
+                " aus\neiner spaeter aufgenommenen Sitzung.")
+    tage = (d2 - d1).days
+    text = (f"Die Pruefsitzung wurde {abs(tage)} Tag{'e' if abs(tage) != 1 else ''} "
+            f"{'nach' if tage > 0 else 'vor'} der Anlernsitzung aufgenommen.")
+    if not aufbau_gleich:
+        text += "\nTastatur oder Mikrofonposition sind laut Sitzung verschieden."
+    return text
+
+
 def main() -> int:
-    p = argparse.ArgumentParser(description="Trennbarkeit der Klassen pruefen")
-    p.add_argument("--train", default=None, help="Sitzung zum Anlernen, sonst die groesste")
-    p.add_argument("--test", default=None, help="Sitzung zum Pruefen, sonst eine andere")
-    p.add_argument("--bild", action="store_true", help="Grafiken nach ausgabe")
+    # Der Aufruf-Block aus dem Docstring erscheint unter --help als Beispiel.
+    p = argparse.ArgumentParser(
+        description="Trennbarkeit der Klassen pruefen",
+        epilog=__doc__[__doc__.index("Aufruf:"):],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--train", default=None,
+                   help="Sitzung zum Anlernen, sonst die groesste mit Rolle train "
+                        "(ersatzweise offen)")
+    p.add_argument("--test", default=None,
+                   help="Sitzung zum Pruefen, sonst eine mit Rolle val (ersatzweise "
+                        "offen); die Testsitzung nur, wenn hier ausdruecklich genannt")
+    p.add_argument("--bild", action="store_true",
+                   help="Klassenvergleich und Konfusionsmatrix nach ausgabe/ schreiben")
     args = p.parse_args()
-    Config.laden()   # setzt die gewaehlten Klassen
+    laden_oder_beenden()   # setzt die gewaehlten Klassen
 
     alle = storage.sitzungen()
     if len(alle) < 1:
@@ -130,21 +180,61 @@ def main() -> int:
         if name and not (ROH / name / "session.json").exists():
             print(f"{ROT}Sitzung {name} nicht gefunden.{AUS}")
             return 1
-    # Abgebrochene, leere Sitzungen kommen fuer die Auswahl nicht in Frage.
-    groessen = {o.name: len(storage.lade_sitzung(o)[1]) for o in alle}
-    groessen = {n: g for n, g in groessen.items() if g > 0}
-    if not groessen and not args.train:
-        print("Es gibt noch keine Sitzung mit Proben.")
+
+    # Fuer die automatische Wahl kommen nur Sitzungen mit Proben und den
+    # eingestellten Klassen in Frage. Abgebrochene, leere Sitzungen fallen
+    # still heraus, fremde Klassen werden genannt.
+    info: dict[str, tuple[dict, int]] = {}
+    fremde: list[str] = []
+    for o in alle:
+        kopf, proben = storage.lade_sitzung(o)
+        if not proben:
+            continue
+        try:
+            datensatz.pruefe_passend(kopf)
+            datensatz.pruefe_labels(kopf, proben)
+        except ValueError:
+            fremde.append(o.name)
+            continue
+        info[o.name] = (kopf, len(proben))
+    if fremde and not (args.train and args.test):
+        print(f"{GRAU}Uebergangen (andere Klassen): {', '.join(fremde)}{AUS}")
+    if not info and not args.train:
+        print("Es gibt noch keine Sitzung mit Proben"
+              + (" und den eingestellten Klassen." if fremde else "."))
         return 1
-    kandidaten = {n: g for n, g in groessen.items() if n != args.test}
-    train_name = args.train or (max(kandidaten, key=kandidaten.get)
-                                if kandidaten else None)
+
+    def waehle(rollen: tuple[str, ...], ausser: set, mindestens: int = 1,
+               zu: tuple | None = None, groesste: bool = False) -> str | None:
+        # Rollen der Reihe nach: erst die passende Rolle, dann "offen". Die
+        # Testsitzung steht nie in dieser Liste - sie soll unberuehrt bleiben.
+        for rolle in rollen:
+            namen = [n for n, (k, g) in info.items()
+                     if k.get("rolle", "offen") == rolle and n not in ausser
+                     and g >= mindestens and (zu is None or schnitt(k) == zu)]
+            if namen:
+                return max(namen, key=lambda n: info[n][1]) if groesste else namen[-1]
+        return None
+
+    train_name = args.train or waehle(("train", "offen"), {args.test}, groesste=True)
     if train_name is None:
-        print(f"{ROT}Zum Anlernen braucht es eine andere Sitzung als "
-              f"{args.test}.{AUS}")
+        if args.test and set(info) <= {args.test}:
+            print(f"{ROT}Zum Anlernen braucht es eine andere Sitzung als "
+                  f"{args.test}.{AUS}")
+        else:
+            print(f"{ROT}Keine Sitzung zum Anlernen gefunden (Rolle train oder offen).")
+            print(f"Mit --train ausdruecklich angeben.{AUS}")
         return 1
-    rest = [n for n in groessen if n != train_name and groessen[n] >= len(TASTEN)]
-    test_name = args.test or (rest[-1] if rest else None)
+    kopf_tr = storage.lade_sitzung(ROH / train_name)[0]
+    test_name = args.test
+    if not test_name:
+        test_name = waehle(("val", "offen"), {train_name}, len(TASTEN), schnitt(kopf_tr))
+        andere_rate = [n for n, (k, g) in info.items()
+                       if n != train_name and k.get("rolle", "offen") in ("val", "offen")
+                       and g >= len(TASTEN) and schnitt(k) != schnitt(kopf_tr)]
+        if andere_rate and test_name is None:
+            print(f"{GRAU}Uebergangen (andere Abtastrate oder anderer Schnitt): "
+                  f"{', '.join(andere_rate)}{AUS}")
     if test_name == train_name:
         print(f"{ROT}Anlernen und Pruefen an derselben Sitzung ergibt keine "
               f"Aussage.{AUS}")
@@ -152,22 +242,50 @@ def main() -> int:
 
     cfg, y_train, b_train, _ = lade(ROH / train_name)
     print(f"Anlernen an {train_name}  ({len(y_train)} Proben)")
+    if kopf_tr.get("rolle") == "test":
+        # Automatisch wird die Testsitzung nie gewaehlt - nur wer sie selbst
+        # nennt, landet hier.
+        print(f"{GELB}{train_name} ist die Testsitzung. Wer an ihr anlernt, hat die "
+              f"unberuehrte\nEndpruefung verbraucht.{AUS}")
     if test_name:
         _, y_test, b_test, _ = lade(ROH / test_name)
+        kopf_te = storage.lade_sitzung(ROH / test_name)[0]
         print(f"Pruefen an   {test_name}  ({len(y_test)} Proben)")
-        print(f"{GRAU}Beide Sitzungen stammen vom selben Tag mit identischem Aufbau -")
-        print(f"das Ergebnis ist deshalb optimistisch. Der ehrliche Test kommt aus")
-        print(f"einer spaeter aufgenommenen Sitzung.{AUS}")
+        if b_train.shape[1:] != b_test.shape[1:]:
+            # Sonst endet der Vergleich in einem Broadcast-Fehler tief in numpy.
+            print(f"{ROT}Die Sitzungen passen nicht zusammen (Spektrogramme "
+                  f"{'x'.join(map(str, b_train.shape[1:]))} und "
+                  f"{'x'.join(map(str, b_test.shape[1:]))}).")
+            print(f"Meist wurde zwischendurch ein Mikrofon mit anderer Abtastrate "
+                  f"gewaehlt.{AUS}")
+            return 1
+        if kopf_te.get("rolle") == "test":
+            print(f"{GELB}{test_name} ist die Testsitzung. Wer hier schon hinschaut, "
+                  f"hat die unberuehrte\nEndpruefung verbraucht.{AUS}")
+        print(f"{GRAU}{abstand_der_aufnahmen(kopf_tr, kopf_te)}{AUS}")
     else:
-        print(f"{GELB}Nur eine Sitzung vorhanden - geprueft wird gegen zurueckgehaltene")
+        # Je Klasse ein Viertel zurueckhalten, mindestens eine Probe. Ein
+        # freier Zufallsschnitt liesse Klassen ohne Anlernprobe zurueck, die
+        # nie getroffen werden koennen - das Urteil waere dann falsch.
+        zu_wenig = [t for t in TASTEN if y_train.count(t) < 2]
+        if zu_wenig:
+            print(f"{ROT}Zu wenige Proben fuer eine Trennbarkeitspruefung: mindestens "
+                  f"2 je Klasse noetig,\nfehlt bei: "
+                  f"{' '.join(anzeige(t) for t in zu_wenig)}{AUS}")
+            return 1
+        print(f"{GELB}Keine passende zweite Sitzung - geprueft wird gegen zurueckgehaltene")
         print(f"Proben derselben Sitzung. Das ist noch optimistischer.{AUS}")
         rng = np.random.default_rng(0)
-        idx = rng.permutation(len(y_train))
-        schnitt = int(len(idx) * 0.75)
-        b_test = b_train[idx[schnitt:]]
-        y_test = [y_train[i] for i in idx[schnitt:]]
-        b_train = b_train[idx[:schnitt]]
-        y_train = [y_train[i] for i in idx[:schnitt]]
+        idx_train, idx_test = [], []
+        for t in TASTEN:
+            idx = rng.permutation([i for i, y in enumerate(y_train) if y == t])
+            n_test = max(1, len(idx) // 4)
+            idx_test += idx[:n_test].tolist()
+            idx_train += idx[n_test:].tolist()
+        b_test = b_train[idx_test]
+        y_test = [y_train[i] for i in idx_test]
+        b_train = b_train[idx_train]
+        y_train = [y_train[i] for i in idx_train]
 
     print(f"\nLog-Mel je Probe: {b_train.shape[1]} Zeitschritte x "
           f"{b_train.shape[2]} Baender")

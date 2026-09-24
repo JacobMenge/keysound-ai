@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from tastenakustik import audio
-from tastenakustik.config import Config
+from tastenakustik.config import laden_oder_beenden
 
 GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
 
@@ -45,9 +45,15 @@ def balken(db: float, tief: float = -120.0, hoch: float = 0.0, breite: int = 32)
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Signalweg live pruefen")
-    p.add_argument("--geraet", default=None, help="Index oder Namensfragment")
-    p.add_argument("--sekunden", type=float, default=1.0, help="Takt der Anzeige")
+    # Der Aufruf-Block aus dem Docstring erscheint unter --help als Beispiel.
+    p = argparse.ArgumentParser(
+        description="Signalweg live pruefen",
+        epilog=__doc__[__doc__.index("Aufruf:"):],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--geraet", default=None,
+                   help="Index oder Namensfragment, sonst das Geraet aus config.json")
+    p.add_argument("--sekunden", type=float, default=1.0,
+                   help="Takt der Anzeige in s (mindestens 0.2, Standard 1)")
     args = p.parse_args()
     if args.sekunden < 0.2:
         # Darunter passen keine zwei Messbloecke in einen Takt - die Anzeige
@@ -55,13 +61,16 @@ def main() -> int:
         print("--sekunden muss mindestens 0.2 sein.")
         return 1
 
-    cfg = Config.laden()
+    cfg = laden_oder_beenden()
     if args.geraet is not None:
         g = audio.geraet_finden(args.geraet)
         if g is None:
             print(f"Geraet {args.geraet!r} nicht gefunden.")
             return 1
-        cfg.device, cfg.device_name = g.index, g.name
+        # Auch die Schnittstelle uebernehmen: Der Ringpuffer sucht das Geraet
+        # ueber Name und Schnittstelle, sonst landete er beim selben Namen
+        # unter der Schnittstelle aus config.json.
+        cfg.device, cfg.device_name, cfg.hostapi = g.index, g.name, g.hostapi
         cfg.samplerate, cfg.channels = audio.bestes_format(g, cfg.samplerate)
     if cfg.device is None:
         print("Keine Konfiguration. Bitte zuerst: python werkzeuge/01_systemcheck.py")
@@ -79,7 +88,15 @@ def main() -> int:
     print("-" * 62)
 
     ring = audio.Ringpuffer(cfg)
-    ring.start()
+    try:
+        ring.start()
+    except RuntimeError as fehler:
+        # Belegtes oder abgestecktes Geraet - gerade das Diagnosewerkzeug soll
+        # dann sagen, was los ist, statt mit einem Traceback abzubrechen.
+        print(f"{ROT}{fehler}{AUS}")
+        print(f"{GRAU}Laeuft das Geraet schon in einem anderen Programm? Verfuegbare "
+              f"Eingaenge: python werkzeuge/01_systemcheck.py --liste{AUS}")
+        return 1
     w = int(BLOCK_MS / 1000 * cfg.samplerate)
     ruhig_seit = 0
     try:
