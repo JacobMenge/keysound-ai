@@ -5,12 +5,10 @@ REM System-Python. Das Fenster bleibt bei einem Fehler offen.
 
 cd /d "%~dp0"
 
-if exist ".venv\Scripts\pythonw.exe" (
-    ".venv\Scripts\python.exe" start.py
-    goto ende
-)
+set PYTHON=python
+if exist ".venv\Scripts\python.exe" set PYTHON=.venv\Scripts\python.exe
 
-python start.py
+"%PYTHON%" start.py
 if errorlevel 1 goto ende
 goto raus
 

@@ -15,6 +15,7 @@ Aufruf:
     python werkzeuge/07_training.py --rollen           # zeigt, was zugeordnet ist
     python werkzeuge/07_training.py
     python werkzeuge/07_training.py --epochen 80 --segment 250
+    python werkzeuge/07_training.py --test             # neuestes Modell gegen "test"
 """
 
 from __future__ import annotations
@@ -31,9 +32,23 @@ matplotlib.use("Agg")
 import numpy as np
 
 from tastenakustik import datensatz, plots, portrait, training
-from tastenakustik.config import TASTEN, Config, zufall
+from tastenakustik.config import TASTEN, Config, anzeige, zufall
 
 GRUEN, GELB, ROT, GRAU, AUS = "\033[92m", "\033[93m", "\033[91m", "\033[90m", "\033[0m"
+
+
+def farbe_fuer(quote: float) -> str:
+    """Ampel gemessen am Zufall - bei 2 und bei 40 Klassen gleich aussagekraeftig."""
+    anteil = (quote - zufall()) / max(1.0 - zufall(), 1e-9)
+    return GRUEN if anteil >= 0.5 else GELB if anteil >= 0.15 else ROT
+
+
+def je_klasse_zeilen(quoten: dict[str, float]) -> None:
+    for taste, quote in quoten.items():
+        if quote != quote:                      # NaN: keine Probe dieser Klasse
+            print(f"  {anzeige(taste)}      -   (keine Probe)")
+        else:
+            print(f"  {anzeige(taste)}  {quote * 100:5.1f} %")
 
 
 def main() -> int:
@@ -45,8 +60,28 @@ def main() -> int:
     p.add_argument("--lernrate", type=float, default=2e-3)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--kein-bild", action="store_true")
+    p.add_argument("--test", action="store_true",
+                   help="nicht trainieren, sondern das neueste Modell auf der "
+                        "Testsitzung pruefen")
     args = p.parse_args()
-    Config.laden()   # setzt die gewaehlten Klassen
+    cfg = Config.laden()   # setzt die gewaehlten Klassen
+
+    if args.test:
+        try:
+            t = training.teste()
+        except (training.DatenFehler, ValueError) as fehler:
+            print(f"{ROT}{fehler}{AUS}")
+            return 1
+        print(f"Modell      {t.modell_pfad.name}")
+        print(f"Test        {t.n} Proben aus {t.sitzungen}")
+        print(f"Trefferquote {farbe_fuer(t.quote)}{t.quote * 100:.1f} %{AUS}   "
+              f"({t.faktor:.1f}-fach ueber Zufall von {zufall() * 100:.1f} %)")
+        if t.val_quote is not None:
+            print(f"Validation  {t.val_quote * 100:.1f} %   (zum Vergleich)")
+        print("\nJe Klasse:")
+        je_klasse_zeilen(t.je_klasse)
+        print(f"\nGespeichert: {t.pfad}")
+        return 0
 
     if args.rollen:
         print("Sitzungen und ihre Rollen:\n")
@@ -54,6 +89,15 @@ def main() -> int:
         print(f"\n{GRAU}Zuordnen mit: python werkzeuge/04_sitzungen.py "
               f"--rolle <ID>=train{AUS}")
         return 0
+
+    fenster_ms = cfg.pre_roll_ms + cfg.post_roll_ms
+    if args.epochen < 1:
+        print(f"{ROT}--epochen muss mindestens 1 sein.{AUS}")
+        return 1
+    if not 20 <= args.segment <= fenster_ms - args.vor:
+        print(f"{ROT}--segment muss zwischen 20 und {fenster_ms - args.vor:.0f} ms "
+              f"liegen - laenger als das aufgenommene Fenster geht nicht.{AUS}")
+        return 1
 
     try:
         train, val = training.pruefe_daten(args.segment, args.vor)
@@ -68,7 +112,7 @@ def main() -> int:
     print(f"Validation  {len(val):>4} Proben aus {sorted(set(val.sitzungen))}")
     print(f"Eingang     {train.x.shape[1]} Mel-Baender x {train.x.shape[2]} Zeitschritte"
           f"   ({args.segment:.0f} ms ab Onset -{args.vor:.0f} ms)")
-    print(f"Klassen     {len(TASTEN)}   ({' '.join(t.upper() for t in TASTEN)})")
+    print(f"Klassen     {len(TASTEN)}   ({' '.join(anzeige(t) for t in TASTEN)})")
     print(f"Zufall      {zufall() * 100:.1f} %\n")
 
     ergebnis = None
@@ -81,15 +125,13 @@ def main() -> int:
             print(f"  Epoche {stand.epoche:>3}   Train {stand.train_acc * 100:5.1f} %"
                   f"   Val {stand.val_acc * 100:5.1f} %   Loss {stand.val_loss:.3f}")
 
-    farbe = (GRUEN if ergebnis.beste_val > 0.5
-             else GELB if ergebnis.beste_val > 2 * zufall() else ROT)
+    farbe = farbe_fuer(ergebnis.beste_val)
     print(f"\nModell      {ergebnis.parameter:,} Parameter".replace(",", " "))
     print(f"Beste Validation {farbe}{ergebnis.beste_val * 100:.1f} %{AUS} in Epoche "
           f"{ergebnis.beste_epoche}   ({ergebnis.faktor:.1f}-fach ueber Zufall)")
     print(f"Dauer {ergebnis.dauer_s:.0f} s")
     print("\nJe Klasse:")
-    for taste, quote in ergebnis.je_klasse.items():
-        print(f"  {taste.upper()}  {quote * 100:5.1f} %")
+    je_klasse_zeilen(ergebnis.je_klasse)
     print(f"\nModell:  {ergebnis.modell_pfad}")
 
     if not args.kein_bild:

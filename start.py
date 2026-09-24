@@ -17,12 +17,14 @@ sie findet Anschlaege allein im Audiosignal.
 
 from __future__ import annotations
 
+import os
 import queue
 import re
 import subprocess
 import sys
 import threading
 import tkinter as tk
+from collections import deque
 from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox
@@ -102,6 +104,16 @@ VORLAGEN = {
     "Alphabet (26)": "abcdefghijklmnopqrstuvwxyz",
 }
 
+# Wie die Vollbild-Werkzeuge in Meldungen heissen.
+WERKZEUG_NAMEN = {
+    "02_kalibrierung.py": "Pegelanzeige",
+    "03_collector.py": "Collector",
+    "08_demo.py": "Live-Demo",
+    "09_selbsttest.py": "Selbsttest",
+}
+
+ZIEL_MIN, ZIEL_MAX = 5, 200
+
 
 # ---------------------------------------------------------------------------
 # Kleine Bausteine
@@ -158,10 +170,15 @@ class Studio(tk.Tk):
         verzeichnisse_anlegen()
         self.cfg = Config.laden()
         self.aktiv = 0
-        self.prozesse: list[subprocess.Popen] = []
+        # Laufende Werkzeuge je Datei, mit den letzten Zeilen ihrer Ausgabe -
+        # die braucht es, um zu sagen, warum eines nicht aufging.
+        self.prozesse: dict[str, tuple[subprocess.Popen, deque]] = {}
         self.trainings_queue: queue.Queue = queue.Queue()
         self.trainings_thread: threading.Thread | None = None
         self.ergebnis: training.Ergebnis | None = None
+        self.verlauf: dict[str, list[float]] | None = None
+        self.test_ergebnis: training.TestErgebnis | None = None
+        self.test_laeuft = False
 
         self.title("Tastenakustik - Studio")
         self.configure(bg=theme.BG)
@@ -230,9 +247,13 @@ class Studio(tk.Tk):
             nach_rolle.setdefault(zeile["rolle"], []).append(zeile)
         return nach_rolle
 
-    def fertig(self, schritt: int) -> bool:
+    def fertig(self, schritt: int, rollen: dict[str, list[dict]] | None = None,
+               modell_da: bool | None = None) -> bool:
         """Ist dieser Schritt erledigt?"""
-        rollen = self.sitzungen_nach_rolle()
+        if rollen is None:
+            rollen = self.sitzungen_nach_rolle()
+        if modell_da is None:
+            modell_da = training.neuestes_modell() is not None
         if schritt == 1:
             return self.cfg.device is not None
         if schritt == 2:
@@ -242,23 +263,33 @@ class Studio(tk.Tk):
         if schritt == 4:
             return bool(rollen["train"])
         if schritt == 5:
-            return training.neuestes_modell() is not None
+            return modell_da
         if schritt == 6:
             return False
         return True
 
     def _takt(self) -> None:
         """Regelmaessig nachsehen, ob ein gestartetes Werkzeug fertig ist."""
-        vorher = len(self.prozesse)
-        self.prozesse = [p for p in self.prozesse if p.poll() is None]
-        if len(self.prozesse) != vorher:
+        beendet = [(datei, p, ausgabe)
+                   for datei, (p, ausgabe) in self.prozesse.items()
+                   if p.poll() is not None]
+        for datei, p, ausgabe in beendet:
+            del self.prozesse[datei]
+            self._werkzeug_beendet(datei, p.returncode, ausgabe)
+        # Nur die Seiten neu aufbauen, die zeigen, was ein Werkzeug erzeugt
+        # hat. Andere wuerden dabei halb ausgefuellte Eingaben verlieren.
+        if beendet and self.aktiv in (0, 3):
             self.zeige(self.aktiv)
         self._nav_auffrischen()
         self.after(700, self._takt)
 
     def _nav_auffrischen(self) -> None:
+        # Einmal je Takt lesen, nicht einmal je Schritt: Bei vielen Sitzungen
+        # sind das sonst dutzende Dateizugriffe pro Sekunde.
+        rollen = self.sitzungen_nach_rolle()
+        modell_da = training.neuestes_modell() is not None
         for i, zeile in enumerate(self.nav_eintraege):
-            ist_fertig = self.fertig(i)
+            ist_fertig = self.fertig(i, rollen, modell_da)
             marke = "✓  " if ist_fertig and i > 0 else "     "
             if i == 0:
                 marke = "     "
@@ -269,9 +300,7 @@ class Studio(tk.Tk):
                 fg=(theme.TEXT if i == self.aktiv
                     else theme.OK if ist_fertig and i > 0 else theme.TEXT_SCHWACH),
             )
-        rollen = self.sitzungen_nach_rolle()
         gesamt = sum(z["gesamt"] for liste in rollen.values() for z in liste)
-        modell_da = training.neuestes_modell() is not None
         self.l_kurzstatus.configure(
             text=f"{len(TASTEN)} Klassen     {gesamt} Proben     "
                  f"{'Modell vorhanden' if modell_da else 'noch kein Modell'}")
@@ -310,23 +339,70 @@ class Studio(tk.Tk):
         return reihe
 
     # -- Werkzeuge starten ----------------------------------------------
-    def starte_werkzeug(self, datei: str, *argumente: str) -> None:
-        """Ein Vollbild-Werkzeug in einem eigenen Prozess oeffnen."""
+    def starte_werkzeug(self, datei: str, *argumente: str) -> bool:
+        """Ein Vollbild-Werkzeug in einem eigenen Prozess oeffnen.
+
+        Jedes Werkzeug laeuft hoechstens einmal: Zwei Collector-Fenster
+        wuerden zwei Sitzungen gleichzeitig schreiben, zwei Demos sich um das
+        Mikrofon streiten.
+        """
+        name = WERKZEUG_NAMEN.get(datei, datei)
+        laufend = self.prozesse.get(datei)
+        if laufend is not None and laufend[0].poll() is None:
+            self.melde(f"{name} ist schon offen - erst dieses Fenster schließen.",
+                       theme.WARN)
+            return False
         pfad = WERKZEUGE / datei
         if not pfad.exists():
             messagebox.showerror("Fehlt", f"{pfad} wurde nicht gefunden.")
-            return
+            return False
+        umgebung = {**os.environ, "PYTHONIOENCODING": "utf-8",
+                    "PYTHONUNBUFFERED": "1"}
         try:
             p = subprocess.Popen([sys.executable, str(pfad), *argumente],
-                                 cwd=str(PROJEKT))
+                                 cwd=str(PROJEKT), env=umgebung,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, encoding="utf-8", errors="replace")
         except OSError as fehler:
             messagebox.showerror("Start fehlgeschlagen", str(fehler))
+            return False
+        ausgabe: deque = deque(maxlen=14)
+
+        def mitlesen() -> None:
+            # Ausgabe weiterreichen wie bisher - und die letzten Zeilen
+            # behalten, falls das Werkzeug mit einem Fehler endet.
+            for zeile in p.stdout:
+                ausgabe.append(zeile.rstrip())
+                if sys.stdout is not None:
+                    try:
+                        sys.stdout.write(zeile)
+                        sys.stdout.flush()
+                    except (OSError, ValueError):
+                        pass
+
+        threading.Thread(target=mitlesen, daemon=True).start()
+        self.prozesse[datei] = (p, ausgabe)
+        self.melde(f"{name} läuft - dieses Fenster bleibt offen.", theme.AKZENT)
+        return True
+
+    def _werkzeug_beendet(self, datei: str, code: int, ausgabe: deque) -> None:
+        """Sagen, wie ein Werkzeug ausgegangen ist - vor allem, wenn es scheiterte."""
+        name = WERKZEUG_NAMEN.get(datei, datei)
+        if code == 0:
+            if datei == "09_selbsttest.py":
+                self.melde("Selbsttest bestanden - die Installation läuft.", theme.OK)
+            else:
+                self.melde(f"{name} geschlossen.")
             return
-        self.prozesse.append(p)
-        self.melde(f"{datei} läuft - dieses Fenster bleibt offen.", theme.AKZENT)
+        zeilen = [ANSI.sub("", z) for z in ausgabe if z.strip()]
+        letzte = "\n".join(zeilen[-8:]) or "(keine Ausgabe)"
+        self.melde(f"{name} wurde mit einem Fehler beendet.", theme.FEHLER)
+        messagebox.showerror(f"{name} - beendet mit Fehler",
+                             f"{name} ist nicht sauber gelaufen. Die letzten "
+                             f"Meldungen:\n\n{letzte}")
 
     def _schliessen(self) -> None:
-        for p in self.prozesse:
+        for p, _ausgabe in self.prozesse.values():
             if p.poll() is None:
                 p.terminate()
         self.destroy()
@@ -396,9 +472,9 @@ class Studio(tk.Tk):
               font=self.f_normal).pack(side="left", padx=(10, 0))
 
     def _selbsttest(self) -> None:
-        self.starte_werkzeug("09_selbsttest.py", "--behalten")
-        self.melde("Der Selbsttest läuft im Terminal - er braucht kein Mikrofon "
-                   "und fasst deine Aufnahmen nicht an.", theme.AKZENT)
+        if self.starte_werkzeug("09_selbsttest.py", "--behalten"):
+            self.melde("Der Selbsttest läuft im Terminal - er braucht kein "
+                       "Mikrofon und fasst deine Aufnahmen nicht an.", theme.AKZENT)
 
     # ===================================================================
     # 1 - Mikrofon
@@ -568,13 +644,16 @@ class Studio(tk.Tk):
         tk.Label(raster, text="Proben je Klasse", font=self.f_normal,
                  bg=theme.PANEL, fg=theme.TEXT_SCHWACH, anchor="w", width=16).grid(
             row=1, column=0, sticky="w", pady=6)
-        self.e_ziel = tk.Spinbox(raster, from_=5, to=200, font=self.f_mono,
-                                 bg=theme.BG, fg=theme.TEXT, width=6, relief="flat",
+        self.e_ziel = tk.Spinbox(raster, from_=ZIEL_MIN, to=ZIEL_MAX,
+                                 font=self.f_mono, bg=theme.BG, fg=theme.TEXT,
+                                 width=6, relief="flat",
                                  buttonbackground=theme.PANEL,
-                                 insertbackground=theme.TEXT)
+                                 insertbackground=theme.TEXT,
+                                 command=self._klassen_vorschau)
         self.e_ziel.delete(0, "end")
         self.e_ziel.insert(0, str(self.cfg.ziel_pro_taste))
         self.e_ziel.grid(row=1, column=1, sticky="w", ipady=5)
+        self.e_ziel.bind("<KeyRelease>", lambda _e: self._klassen_vorschau())
 
         tk.Label(raster, text="Sperrfolge", font=self.f_normal, bg=theme.PANEL,
                  fg=theme.TEXT_SCHWACH, anchor="w", width=16).grid(
@@ -584,8 +663,9 @@ class Studio(tk.Tk):
                                  relief="flat", width=24)
         self.e_sperre.insert(0, self.cfg.sperrfolge)
         self.e_sperre.grid(row=2, column=1, sticky="w", ipady=6, ipadx=8)
-        tk.Label(raster, text="optional: ein Wort, das du später blind testen "
-                              "willst. Es kommt dann in keiner Aufnahmefolge vor.",
+        tk.Label(raster, text="optional: ein Wort aus deinen Klassen, das du später "
+                              "blind testen willst. Es kommt dann in keiner "
+                              "Aufnahmefolge vor.",
                  font=self.f_klein, bg=theme.PANEL, fg=theme.TEXT_SCHWACH,
                  anchor="w").grid(row=3, column=1, sticky="w")
 
@@ -626,7 +706,7 @@ class Studio(tk.Tk):
             rundes_rechteck(self.vorschau, x0, y0, x0 + kachel, y0 + kachel, 7,
                             fill=farbe, outline="")
             self.vorschau.create_text(x0 + kachel / 2, y0 + kachel / 2,
-                                      text=zeichen.upper(), fill=theme.BG,
+                                      text=anzeige(zeichen), fill=theme.BG,
                                       font=(self.fam, 13, "bold"))
 
         try:
@@ -643,9 +723,32 @@ class Studio(tk.Tk):
     def _klassen_speichern(self) -> None:
         try:
             liste = pruefe_klassen(self.e_klassen.get())
-            ziel = int(self.e_ziel.get())
-        except (KlassenFehler, ValueError) as fehler:
+        except KlassenFehler as fehler:
             messagebox.showerror("Geht so nicht", str(fehler))
+            return
+        try:
+            ziel = int(self.e_ziel.get())
+        except ValueError:
+            ziel = 0
+        if not ZIEL_MIN <= ziel <= ZIEL_MAX:
+            messagebox.showerror(
+                "Geht so nicht",
+                f"Proben je Klasse: eine ganze Zahl von {ZIEL_MIN} bis {ZIEL_MAX}.")
+            return
+        sperre = self.e_sperre.get().strip().lower()
+        fremd = sorted({c for c in sperre if c not in liste})
+        if fremd:
+            messagebox.showerror(
+                "Geht so nicht",
+                "Die Sperrfolge enthält Zeichen, die keine Klasse sind: "
+                f"{' '.join(fremd)}\n\nSie soll ein Wort sein, das du später "
+                "blind testest - das geht nur mit Zeichen, die das Modell kennt.")
+            return
+        if len(sperre) == 1:
+            messagebox.showerror(
+                "Geht so nicht",
+                "Die Sperrfolge braucht mindestens zwei Zeichen. Ein einzelnes "
+                "Zeichen ließe sich nicht aufnehmen, ohne es zu verwenden.")
             return
 
         vorhanden = storage.uebersicht()
@@ -660,8 +763,11 @@ class Studio(tk.Tk):
             if not weiter:
                 return
 
+        if list(TASTEN) != liste:
+            # Ergebnisse zu den alten Klassen gelten nicht mehr.
+            self.ergebnis = self.verlauf = self.test_ergebnis = None
         self.cfg.klassen = "".join(liste)
-        self.cfg.sperrfolge = self.e_sperre.get().strip().lower()
+        self.cfg.sperrfolge = sperre
         self.cfg.ziel_pro_taste = ziel
         self.cfg.anwenden()
         self.cfg.speichern()
@@ -787,10 +893,13 @@ class Studio(tk.Tk):
 
         def laufen() -> None:
             try:
+                # UTF-8 erzwingen: Sonst schreibt das Werkzeug in die Pipe mit
+                # der Windows-Codepage, und Umlaute kommen hier kaputt an.
                 p = subprocess.run(
                     [sys.executable, str(WERKZEUGE / datei), *argumente],
                     cwd=str(PROJEKT), capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", timeout=600)
+                    encoding="utf-8", errors="replace", timeout=600,
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8"})
                 ergebnis.put(ANSI.sub("", (p.stdout or "") + (p.stderr or "")))
             except Exception as fehler:                    # noqa: BLE001
                 ergebnis.put(f"{type(fehler).__name__}: {fehler}")
@@ -867,14 +976,26 @@ class Studio(tk.Tk):
         self.k_grafiken = Knopf(reihe, "Grafiken im Hochformat speichern",
                                 self._grafiken_exportieren, font=self.f_normal)
         self.k_grafiken.pack(side="left")
-        self.k_weiter = Knopf(reihe, "Weiter zum Test", lambda: self.zeige(6),
+        self.k_test = Knopf(reihe, "Auf Testsitzung prüfen", self._test_starten,
+                            font=self.f_normal)
+        self.k_test.pack(side="left", padx=(10, 0))
+        self.k_weiter = Knopf(reihe, "Weiter zum Live-Test", lambda: self.zeige(6),
                               fett=True, font=self.f_normal)
         self.k_weiter.pack(side="left", padx=(10, 0))
         for k in (self.k_grafiken, self.k_weiter):
             k.setze_aktiv(self.ergebnis is not None)
 
+        self.l_test = tk.Label(f, text="", font=self.f_normal, bg=theme.PANEL,
+                               fg=theme.TEXT_SCHWACH, anchor="w",
+                               justify="left", wraplength=800)
+        self.l_test.pack(fill="x", pady=(12, 0))
+
         laeuft = (self.trainings_thread is not None
                   and self.trainings_thread.is_alive())
+        if self.verlauf and self.verlauf["epoche"]:
+            # Beim Zurueckkommen auf diesen Schritt die Kurven wieder zeigen -
+            # das Panel wird jedes Mal neu gebaut.
+            self._kurven_zeichnen()
         if laeuft:
             self.k_training.setze_aktiv(False)
             self.l_training.configure(text="läuft …")
@@ -892,6 +1013,7 @@ class Studio(tk.Tk):
             except ValueError as fehler:
                 self.l_training.configure(text=str(fehler), fg=theme.FEHLER)
                 self.k_training.setze_aktiv(False)
+        self._test_anzeige()
 
     def _training_achsen(self) -> None:
         for ax, titel in ((self.ax_verlust, "Fehler"), (self.ax_quote, "Trefferquote")):
@@ -958,6 +1080,7 @@ class Studio(tk.Tk):
                 return
             if isinstance(nachricht, training.Ergebnis):
                 self.ergebnis = nachricht
+                self.test_ergebnis = None      # gehoerte zum vorigen Modell
                 if self._sichtbar():
                     self.k_training.setze_aktiv(True)
                     self._training_ergebnis_zeigen(nachricht)
@@ -981,26 +1104,31 @@ class Studio(tk.Tk):
             neu = True
 
         if neu and self._sichtbar():
-            v = self.verlauf
-            self._training_achsen()
-            self.ax_verlust.plot(v["epoche"], v["train_loss"], color=theme.AKZENT,
-                                 lw=1.6, label="Training")
-            self.ax_verlust.plot(v["epoche"], v["val_loss"], color=theme.AKZENT2,
-                                 lw=1.6, label="Validation")
-            self.ax_verlust.legend(fontsize=8, facecolor=theme.BG,
-                                   edgecolor=theme.GRID, labelcolor=theme.TEXT)
-            self.ax_quote.plot(v["epoche"], v["train_acc"], color=theme.AKZENT, lw=1.6)
-            self.ax_quote.plot(v["epoche"], v["val_acc"], color=theme.AKZENT2, lw=1.6)
-            self.ax_quote.set_ylim(0, 100)
-            self.fig_training.tight_layout(pad=1.6)
-            self.canvas_training.draw()
+            self._kurven_zeichnen()
 
         self.after(120, self._training_takt)
 
+    def _kurven_zeichnen(self) -> None:
+        v = self.verlauf
+        self._training_achsen()
+        self.ax_verlust.plot(v["epoche"], v["train_loss"], color=theme.AKZENT,
+                             lw=1.6, label="Training")
+        self.ax_verlust.plot(v["epoche"], v["val_loss"], color=theme.AKZENT2,
+                             lw=1.6, label="Validation")
+        self.ax_verlust.legend(fontsize=8, facecolor=theme.BG,
+                               edgecolor=theme.GRID, labelcolor=theme.TEXT)
+        self.ax_quote.plot(v["epoche"], v["train_acc"], color=theme.AKZENT, lw=1.6)
+        self.ax_quote.plot(v["epoche"], v["val_acc"], color=theme.AKZENT2, lw=1.6)
+        self.ax_quote.set_ylim(0, 100)
+        self.fig_training.tight_layout(pad=1.6)
+        self.canvas_training.draw()
+
     def _training_ergebnis_zeigen(self, e: training.Ergebnis) -> None:
-        farbe = (theme.OK if e.beste_val > 0.5
-                 else theme.WARN if e.beste_val > 2 * zufall() else theme.FEHLER)
-        schwach = sorted(e.je_klasse.items(), key=lambda p: p[1])[:3]
+        farbe = theme.quoten_farbe(e.beste_val)
+        # Klassen ohne Validierungsprobe haben keine Quote - sie tauchen hier
+        # nicht als "0 %" auf.
+        schwach = sorted(((t, q) for t, q in e.je_klasse.items() if q == q),
+                         key=lambda p: p[1])[:3]
         self.l_training.configure(
             text=f"fertig in {e.dauer_s:.0f} s", fg=theme.TEXT_SCHWACH)
         self.l_ergebnis.configure(
@@ -1017,6 +1145,7 @@ class Studio(tk.Tk):
             fg=farbe)
         for k in (self.k_grafiken, self.k_weiter):
             k.setze_aktiv(True)
+        self._test_anzeige()
 
     def _grafiken_exportieren(self) -> None:
         if self.ergebnis is None:
@@ -1025,17 +1154,90 @@ class Studio(tk.Tk):
         from tastenakustik import plots, portrait
 
         e = self.ergebnis
-        theme.anwenden("hochformat")
         pfade = []
-        epochen = np.arange(1, len(e.verlauf["val_acc"]) + 1)
-        fig = plots.trainingsverlauf(epochen, e.verlauf["train_loss"],
-                                     e.verlauf["val_loss"], e.verlauf["train_acc"],
-                                     e.verlauf["val_acc"])
-        pfade.append(portrait.exportiere(fig, "06_training", "04_modell"))
-        fig = plots.konfusionsmatrix(e.konfusion, e.beste_val)
-        pfade.append(portrait.exportiere(fig, "08_confusion", "04_modell"))
-        theme.anwenden("normal")
+        theme.anwenden("hochformat")
+        try:
+            epochen = np.arange(1, len(e.verlauf["val_acc"]) + 1)
+            fig = plots.trainingsverlauf(epochen, e.verlauf["train_loss"],
+                                         e.verlauf["val_loss"], e.verlauf["train_acc"],
+                                         e.verlauf["val_acc"])
+            pfade.append(portrait.exportiere(fig, "06_training", "04_modell"))
+            fig = plots.konfusionsmatrix(e.konfusion, e.beste_val)
+            pfade.append(portrait.exportiere(fig, "08_confusion", "04_modell"))
+        except Exception as fehler:                        # noqa: BLE001
+            self.melde(f"Grafiken nicht gespeichert: {fehler}", theme.FEHLER)
+            return
+        finally:
+            # Sonst bleibt der grosse Hochformat-Stil fuer die Live-Kurven stehen.
+            theme.anwenden("normal")
         self.melde(f"Gespeichert in {pfade[0].parent}", theme.OK)
+
+    # -- Testsitzung ----------------------------------------------------
+    def _test_anzeige(self) -> None:
+        """Knopf und Zeile fuer die Testsitzung auf den aktuellen Stand bringen."""
+        l_test = getattr(self, "l_test", None)
+        if self.aktiv != 5 or l_test is None or not l_test.winfo_exists():
+            return
+        modell_da = training.neuestes_modell() is not None
+        test_da = bool(self.sitzungen_nach_rolle()["test"])
+        trainiert = (self.trainings_thread is not None
+                     and self.trainings_thread.is_alive())
+        self.k_test.setze_aktiv(modell_da and test_da and not trainiert
+                                and not self.test_laeuft)
+        t = self.test_ergebnis
+        if self.test_laeuft:
+            self.l_test.configure(text="Testsitzung wird ausgewertet …",
+                                  fg=theme.AKZENT)
+        elif t is not None:
+            vergleich = (f"   ·   Validation zum Vergleich {t.val_quote * 100:.1f} %"
+                         if t.val_quote is not None else "")
+            self.l_test.configure(
+                text=f"Testsitzung: {t.quote * 100:.1f} %  ({t.faktor:.1f}-fach "
+                     f"über dem Zufall, {t.n} Proben aus "
+                     f"{', '.join(t.sitzungen)}){vergleich}\n"
+                     f"Das ist die ehrliche Zahl. Gespeichert in "
+                     f"{t.pfad.name if t.pfad else '-'}.",
+                fg=theme.quoten_farbe(t.quote))
+        elif modell_da and not test_da:
+            self.l_test.configure(
+                text="Für die ehrliche Zahl fehlt noch eine Sitzung mit der Rolle "
+                     "„test“ - am besten an einem anderen Tag aufgenommen.",
+                fg=theme.TEXT_SCHWACH)
+        else:
+            self.l_test.configure(text="", fg=theme.TEXT_SCHWACH)
+
+    def _test_starten(self) -> None:
+        if self.test_laeuft:
+            return
+        self.test_laeuft = True
+        self._test_anzeige()
+        ergebnis: queue.Queue = queue.Queue()
+
+        def laufen() -> None:
+            try:
+                ergebnis.put(training.teste())
+            except Exception as fehler:                    # noqa: BLE001
+                ergebnis.put(fehler)
+
+        threading.Thread(target=laufen, daemon=True).start()
+
+        def nachsehen() -> None:
+            try:
+                antwort = ergebnis.get_nowait()
+            except queue.Empty:
+                self.after(150, nachsehen)
+                return
+            self.test_laeuft = False
+            if isinstance(antwort, Exception):
+                self.test_ergebnis = None
+                self.melde(f"Test nicht möglich: {antwort}", theme.FEHLER)
+            else:
+                self.test_ergebnis = antwort
+                self.melde(f"Testsitzung: {antwort.quote * 100:.1f} %",
+                           theme.quoten_farbe(antwort.quote))
+            self._test_anzeige()
+
+        self.after(150, nachsehen)
 
     # ===================================================================
     # 6 - Live testen
@@ -1045,13 +1247,18 @@ class Studio(tk.Tk):
             f, "Modell live testen",
             "Die Demo öffnet sich im Hochformat und hört zu. Sie liest keine "
             "Tastatur-Ereignisse - sie findet Anschläge allein im Audiosignal "
-            "und ordnet jeden einer Klasse zu."
+            "und ordnet jeden einer Klasse zu. Bedient wird sie deshalb nur mit "
+            "der Maus: Knöpfe unter dem Bild, im Bühnenmodus ein Rechtsklick "
+            "ins Bild. Die Tastatur bleibt ganz frei zum Testen."
         )
 
         modell_pfad = training.neuestes_modell()
         if modell_pfad is None:
             self._absatz(f, "Es gibt noch kein trainiertes Modell.", theme.WARN)
             return
+        # Die Demo nimmt die Klassen aus der Modelldatei. Nach einem
+        # Klassenwechsel ohne neues Training sind das andere als eingestellt.
+        self.demo_klassen = training.modell_klassen(modell_pfad) or list(TASTEN)
 
         self._absatz(
             f,
@@ -1064,9 +1271,16 @@ class Studio(tk.Tk):
             "zählt das Loslassen einer Taste als eigener Anschlag, und du "
             "bekommst doppelte Buchstaben.")
 
-        tk.Label(f, text=f"Modell: {modell_pfad.name}", font=self.f_mono,
-                 bg=theme.PANEL, fg=theme.TEXT_SCHWACH, anchor="w").pack(
-            fill="x", pady=(20, 0))
+        tk.Label(f, text=f"Modell: {modell_pfad.name}   Klassen: "
+                         f"{' '.join(anzeige(t) for t in self.demo_klassen)}",
+                 font=self.f_mono, bg=theme.PANEL, fg=theme.TEXT_SCHWACH,
+                 anchor="w").pack(fill="x", pady=(20, 0))
+        if self.demo_klassen != list(TASTEN):
+            self._absatz(
+                f, "Dieses Modell wurde mit anderen Klassen trainiert als "
+                   "gerade eingestellt. Die Demo nimmt die Klassen des Modells - "
+                   "für die eingestellten Klassen erst neu trainieren.",
+                theme.WARN)
 
         vergleich = tk.Frame(f, bg=theme.PANEL)
         vergleich.pack(fill="x", pady=(16, 0))
@@ -1076,7 +1290,8 @@ class Studio(tk.Tk):
                                fg=theme.TEXT, insertbackground=theme.TEXT,
                                relief="flat", width=24)
         self.e_soll.pack(side="left", padx=(10, 0), ipady=5, ipadx=8)
-        if self.cfg.sperrfolge:
+        if self.cfg.sperrfolge and all(c in self.demo_klassen
+                                       for c in self.cfg.sperrfolge):
             self.e_soll.insert(0, self.cfg.sperrfolge)
         tk.Label(vergleich, text="nur für die Anzeige - geht nicht in die "
                                  "Vorhersage ein",
@@ -1086,7 +1301,7 @@ class Studio(tk.Tk):
         reihe = self._knopfreihe(f)
         Knopf(reihe, "Live-Demo öffnen", self._demo_oeffnen, fett=True,
               font=self.f_normal).pack(side="left")
-        Knopf(reihe, "ohne Bedienhinweise (zum Filmen)",
+        Knopf(reihe, "ohne Titel und Knöpfe (zum Filmen)",
               lambda: self._demo_oeffnen(buehne=True),
               font=self.f_normal).pack(side="left", padx=(10, 0))
 
@@ -1094,7 +1309,7 @@ class Studio(tk.Tk):
         argumente = []
         soll = self.e_soll.get().strip().lower()
         if soll:
-            unbekannt = sorted({c for c in soll if c not in TASTEN})
+            unbekannt = sorted({c for c in soll if c not in self.demo_klassen})
             if unbekannt:
                 messagebox.showerror(
                     "Zeichen nicht dabei",

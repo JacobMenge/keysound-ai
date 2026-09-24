@@ -133,6 +133,22 @@ def speichere_asset(fig, name: str, unterordner: str = "", dpi: int = 200) -> Pa
     return pfad
 
 
+def quoten_farbe(quote: float) -> str:
+    """Ampelfarbe fuer eine Trefferquote - gemessen am Zufall, nicht absolut.
+
+    Bei zwei Klassen sind 55 % kaum mehr als Raten, bei vierzig Klassen sind
+    30 % schon ein deutliches Signal. Deshalb zaehlt, wie weit die Quote auf
+    dem Weg vom Zufall zur Perfektion ist.
+    """
+    zufall = 1.0 / max(len(TASTEN), 1)
+    anteil = (quote - zufall) / max(1.0 - zufall, 1e-9)
+    if anteil >= 0.5:
+        return OK
+    if anteil >= 0.15:
+        return WARN
+    return FEHLER
+
+
 def pegel_farbe(db: float) -> str:
     """Ampelfarbe fuer einen Spitzenpegel in dBFS."""
     if db >= -3.0:

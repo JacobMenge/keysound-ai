@@ -133,6 +133,16 @@ def lade(rolle: str, segment_ms: float = 250.0, vor_ms: float = 15.0
     if not teile_x:
         return cfg, Datensatz(np.zeros((0, 1, 1), np.float32),
                               np.zeros((0,), np.int64), [], rolle)
+    formen = sorted({t.shape[1:] for t in teile_x})
+    if len(formen) > 1:
+        # Passiert, wenn zwischen zwei Sitzungen das Mikrofon mit einer
+        # anderen Abtastrate gewechselt wurde: Die Spektrogramme sind dann
+        # unterschiedlich lang und lassen sich nicht stapeln.
+        raise ValueError(
+            f"Die Sitzungen mit der Rolle '{rolle}' passen nicht zusammen "
+            f"(Spektrogramme {' und '.join('x'.join(map(str, f)) for f in formen)}). "
+            "Meist wurde zwischendurch ein Mikrofon mit anderer Abtastrate "
+            "gewählt. Alle Sitzungen einer Rolle mit demselben Eingang aufnehmen.")
     x = normiere(np.concatenate(teile_x))
     y = np.concatenate(teile_y)
     return cfg, Datensatz(x, y, herkunft, rolle)
